@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime
+from unittest.mock import AsyncMock, Mock, patch
 
 from sp_services.client import (
+    SpServicesClient,
+    _AuthContext,
     _code_from_url,
     _extract_csrf,
     _extract_csrf_from_response,
@@ -17,6 +20,7 @@ from sp_services.client import (
     _parse_monthly_usage,
     _period_matches_month,
 )
+from sp_services.exceptions import AuthenticationError
 
 
 class TestClientHelpers(unittest.TestCase):
@@ -199,3 +203,143 @@ Period,Status,Current
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        return cls(2026, 4, 12, 12, 0, 0)
+
+
+class TestClientFlows(unittest.IsolatedAsyncioTestCase):
+    async def test_begin_browser_login_returns_authorize_url(self) -> None:
+        client = SpServicesClient()
+        context = _AuthContext(
+            oauth_state="oauth-state",
+            login_state="login-state",
+            nonce="nonce-value",
+            code_verifier="verifier-value",
+            csrf="csrf-value",
+        )
+        client._bootstrap_auth = AsyncMock(return_value=context)  # type: ignore[method-assign]
+
+        url = await client.begin_browser_login()
+
+        self.assertIn("state=oauth-state", url)
+        self.assertIn("nonce=nonce-value", url)
+        self.assertIs(client._auth_context, context)
+        await client.close()
+
+    async def test_exchange_callback_url_uses_authorization_code(self) -> None:
+        client = SpServicesClient()
+        client._auth_context = _AuthContext(
+            oauth_state="expected-state",
+            login_state="login-state",
+            nonce="nonce-value",
+            code_verifier="verifier-value",
+            csrf="csrf-value",
+        )
+        client._post_json = AsyncMock(  # type: ignore[method-assign]
+            return_value={"access_token": "token-123"}
+        )
+
+        token = await client.exchange_callback_url(
+            "https://services.spservices.sg/callback?code=abc&state=expected-state"
+        )
+
+        self.assertEqual(token, "token-123")
+        client._post_json.assert_awaited_once()
+        await client.close()
+
+    async def test_exchange_callback_url_rejects_invalid_callback(self) -> None:
+        client = SpServicesClient()
+        client._auth_context = _AuthContext(
+            oauth_state="expected-state",
+            login_state="login-state",
+            nonce="nonce-value",
+            code_verifier="verifier-value",
+            csrf="csrf-value",
+        )
+
+        with self.assertRaises(AuthenticationError):
+            await client.exchange_callback_url(
+                "https://services.spservices.sg/callback?state=expected-state"
+            )
+
+        await client.close()
+
+    async def test_fetch_usage_builds_usage_from_mocked_responses(self) -> None:
+        client = SpServicesClient()
+        client._skalbox_call = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                {
+                    "data": {
+                        "accounts": [
+                            {
+                                "accountNo": "8949049293",
+                                "premiseNo": "EBS-1",
+                                "msslPremiseNo": "MSSL-1",
+                            }
+                        ]
+                    }
+                },
+                {"status": 100, "results": []},
+                {"status": 150},
+            ]
+        )
+        client._post_text = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                """"Electricity"
+"Period","Status","Current"
+"2026-03-01","Actual","572"
+
+"Gas"
+"No data available"
+
+"Water"
+"Period","Status","Current"
+"2026-03-01","Estimated","34.1"
+""",
+                """"Period","Current"
+"2026-04-12 00:00:00","1.2"
+"2026-04-12 00:30:00","0.8"
+""",
+                """"Period","Current"
+"2026-04-11","15.265"
+"2026-04-12","19.967"
+"2026-04-13","0.0"
+""",
+            ]
+        )
+
+        with patch("sp_services.client.datetime", FixedDateTime):
+            usage = await client.fetch_usage("token-123")
+
+        self.assertEqual(usage.account_no, "8949049293")
+        self.assertEqual(usage.electricity_today_kwh, 2.0)
+        self.assertIsNone(usage.electricity_month_kwh)
+        self.assertEqual(usage.electricity_last_month_kwh, 572.0)
+        self.assertEqual(usage.water_last_month_m3, 34.1)
+        self.assertEqual(len(usage.electricity_hourly_history or []), 2)
+        self.assertEqual(len(usage.electricity_daily_history or []), 2)
+        self.assertEqual(len(usage.electricity_monthly_history or []), 1)
+        self.assertEqual(len(usage.water_monthly_history or []), 1)
+        await client.close()
+
+    async def test_format_login_error_uses_json_error_fields(self) -> None:
+        client = SpServicesClient(debug=True)
+        resp = Mock()
+        resp.status_code = 401
+        resp.url = "https://identity.spdigital.auth0.com/usernamepassword/login"
+        resp.history = []
+        resp.json.return_value = {
+            "description": "Invalid captcha value",
+            "name": "invalid_captcha",
+        }
+
+        message = client._format_login_error(resp)
+
+        self.assertIn("invalid_captcha", message)
+        self.assertIn("Invalid captcha value", message)
+        self.assertIn("status=401", message)
+        await client.close()
