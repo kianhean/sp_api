@@ -61,6 +61,7 @@ _CSRF_RE = re.compile(r'name=["\']_csrf["\'][^>]*value=["\']([^"\']+)["\']')
 _INLINE_CSRF_RE = re.compile(r'"_csrf"\s*:\s*"([^"]+)"')
 _CSRF_TOKEN_RE = re.compile(r'"csrf(?:_token|Token)?"\s*:\s*"([^"]+)"')
 _CONFIG_BLOB_RE = re.compile(r"@@config@@([^\"'<\s]+)")
+_SET_COOKIE_CSRF_RE = re.compile(r"(?:^|;\s*|,?\s*)_csrf=([^;,\s]+)")
 
 
 @dataclass(slots=True)
@@ -321,9 +322,12 @@ class SpServicesClient:
             )
 
         html = getattr(resp, "text", "") or ""
-        csrf = _extract_csrf(html)
+        csrf = _extract_csrf_from_response(resp, html)
         if not csrf:
-            raise ApiError("SP Services authorize page did not expose a CSRF token")
+            raise ApiError(
+                "SP Services authorize bootstrap returned no CSRF token in HTML, "
+                "cookies, or headers"
+            )
         login_state = _extract_login_state(str(getattr(resp, "url", ""))) or oauth_state
 
         return _AuthContext(
@@ -439,6 +443,30 @@ def _extract_csrf(html: str) -> str | None:
         value = config.get(key)
         if value:
             return str(value)
+    return None
+
+
+def _extract_csrf_from_response(resp: Any, html: str) -> str | None:
+    csrf = _extract_csrf(html)
+    if csrf:
+        return csrf
+
+    cookies = getattr(resp, "cookies", None)
+    if cookies is not None:
+        for key in ("_csrf", "csrf", "csrfToken", "csrf_token"):
+            try:
+                value = cookies.get(key)
+            except Exception:
+                value = None
+            if value:
+                return str(value)
+
+    headers = getattr(resp, "headers", {}) or {}
+    set_cookie = headers.get("set-cookie") or headers.get("Set-Cookie") or ""
+    match = _SET_COOKIE_CSRF_RE.search(str(set_cookie))
+    if match:
+        return match.group(1)
+
     return None
 
 

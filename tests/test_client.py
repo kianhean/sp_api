@@ -6,6 +6,7 @@ from datetime import datetime
 from sp_services.client import (
     _code_from_url,
     _extract_csrf,
+    _extract_csrf_from_response,
     _extract_primary_account,
     _parse_daily_csv,
     _parse_monthly_csv,
@@ -14,6 +15,16 @@ from sp_services.client import (
 
 
 class TestClientHelpers(unittest.TestCase):
+    def test_extract_csrf_from_response_cookie(self) -> None:
+        class FakeResponse:
+            cookies = {"_csrf": "cookie-token"}
+            headers = {}
+
+        self.assertEqual(
+            _extract_csrf_from_response(FakeResponse(), ""),
+            "cookie-token",
+        )
+
     def test_extract_csrf_from_input_field(self) -> None:
         html = '<input type="hidden" name="_csrf" value="csrf-token-123">'
         self.assertEqual(_extract_csrf(html), "csrf-token-123")

@@ -4,15 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import asdict
 from getpass import getpass
+from pathlib import Path
 
 from .client import SpServicesClient
 
 
+def _load_env_file() -> None:
+    env_path = Path(".env")
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
 async def _run() -> None:
-    username = input("Username: ").strip()
-    password = getpass("Password: ")
+    _load_env_file()
+    username = os.environ.get("SP_SERVICES_USERNAME", "").strip() or input(
+        "Username: "
+    ).strip()
+    password = os.environ.get("SP_SERVICES_PASSWORD") or getpass("Password: ")
 
     async with SpServicesClient() as client:
         challenge = await client.login(username, password)

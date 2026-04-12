@@ -12,6 +12,13 @@ uv sync
 
 This project includes a manual end-to-end runner for verifying the real SP login, SMS OTP flow, and usage download against your account.
 
+Create a local `.env` file first:
+
+```dotenv
+SP_SERVICES_USERNAME=your-email@example.com
+SP_SERVICES_PASSWORD=your-password
+```
+
 Run it with:
 
 ```bash
