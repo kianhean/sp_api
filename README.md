@@ -63,6 +63,12 @@ Run the interactive end-to-end verification:
 uv run sp-services-e2e
 ```
 
+To also save the fetched payload to disk:
+
+```bash
+uv run sp-services-e2e --save-json usage.json
+```
+
 The CLI will:
 
 - read credentials from `.env` if present
@@ -86,6 +92,82 @@ When that happens, the CLI will:
 6. continue fetching usage data
 
 This is the intended manual verification path for real accounts.
+
+### How To Capture The Callback URL
+
+After you complete login, captcha, and OTP in the browser, SP Services may
+redirect immediately away from the Auth0 callback page. In many cases the final
+callback URL is visible only briefly, so the most reliable method is to capture
+it from the browser network log.
+
+Expected callback shape:
+
+```text
+https://services.spservices.sg/callback?fromLogin=true&code=...&state=...
+```
+
+You need the full URL, including both:
+
+- `code=...`
+- `state=...`
+
+#### Fast Path: Copy From Address Bar
+
+If the browser pauses on the callback URL long enough:
+
+1. complete the login flow
+2. when the page lands on `services.spservices.sg/callback?...`
+3. copy the full URL from the address bar
+4. paste it into the CLI at `Callback URL:`
+
+#### Reliable Path: Use Browser DevTools Network Tab
+
+If the page redirects too quickly, use the network tab instead.
+
+Chrome or Edge:
+
+1. open DevTools with `Cmd+Option+I` on macOS or `Ctrl+Shift+I` on Windows/Linux
+2. open the `Network` tab
+3. enable `Preserve log`
+4. start the browser login flow from the URL printed by the CLI
+5. complete captcha, login, and OTP
+6. in the network request list, look for a request to:
+
+```text
+https://services.spservices.sg/callback?fromLogin=true&code=...&state=...
+```
+
+7. click that request
+8. copy the full Request URL from the headers panel
+9. paste it into the CLI
+
+Safari:
+
+1. enable the Develop menu if needed
+2. open Web Inspector
+3. go to the `Network` tab
+4. enable persistent logging if available
+5. complete the login flow
+6. find the request to `services.spservices.sg/callback?...`
+7. copy the full request URL
+8. paste it into the CLI
+
+Firefox:
+
+1. open Developer Tools
+2. open `Network`
+3. enable persistent logs
+4. complete the login flow
+5. locate the `services.spservices.sg/callback?...` request
+6. copy the full URL from the request details
+7. paste it into the CLI
+
+#### Important
+
+- copy the callback URL, not the later redirected portal URL
+- the callback URL must include the `code` query parameter
+- the `state` value must match the login attempt currently running in the CLI
+- if you restart the CLI, use the new callback URL from that new run
 
 ## Library Usage
 
@@ -184,6 +266,7 @@ uv sync --group dev
 uv run ruff check .
 uv run pytest
 uv run sp-services-e2e
+uv run sp-services-e2e --save-json usage.json
 ```
 
 ## CI

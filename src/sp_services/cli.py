@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -28,7 +29,19 @@ def _load_env_file() -> None:
         os.environ.setdefault(key.strip(), value.strip())
 
 
-async def _run() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Interactive E2E CLI for SP Services login and usage fetch."
+    )
+    parser.add_argument(
+        "--save-json",
+        dest="save_json",
+        help="Write the fetched usage payload to a JSON file.",
+    )
+    return parser
+
+
+async def _run(save_json: str | None = None) -> None:
     _load_env_file()
     debug = os.environ.get("SP_SERVICES_DEBUG", "").strip().lower() in {
         "1",
@@ -71,7 +84,12 @@ async def _run() -> None:
                 token = await client.exchange_callback_url(callback_url)
 
             usage = await client.fetch_usage(token)
-            print(json.dumps(asdict(usage), indent=2, default=str))
+            payload = json.dumps(asdict(usage), indent=2, default=str)
+            print(payload)
+            if save_json:
+                output_path = Path(save_json)
+                output_path.write_text(f"{payload}\n")
+                print(f"Saved JSON to {output_path}")
     except SpServicesError as err:
         print(f"SP Services error: {err}")
         if debug:
@@ -80,4 +98,5 @@ async def _run() -> None:
 
 
 def main() -> None:
-    asyncio.run(_run())
+    args = _build_parser().parse_args()
+    asyncio.run(_run(save_json=args.save_json))
