@@ -280,6 +280,7 @@ class SpServicesClient:
         water_today: float | None = None
         electricity_last_month_kwh: float | None = None
         water_last_month_m3: float | None = None
+        electricity_daily_history: list[UsagePoint] = []
         electricity_hourly_history: list[UsagePoint] = []
 
         monthly_csv = await self._post_text(
@@ -318,6 +319,18 @@ class SpServicesClient:
                 electricity_today if electricity_today is not None else csv_elec_today
             )
 
+        try:
+            daily_summary_csv = await self._post_text(
+                _SKALBOX_DAILY_CSV_URL,
+                {"accountNos": [account_no], "consumptionBy": "dayCSV"},
+                token=token,
+            )
+        except ApiError:
+            daily_summary_csv = ""
+        electricity_daily_history = _parse_daily_history_csv(daily_summary_csv)
+        if electricity_today is None and electricity_daily_history:
+            electricity_today = _latest_value_for_day(electricity_daily_history, now)
+
         return UsageData(
             electricity_today_kwh=electricity_today,
             electricity_month_kwh=electricity_month,
@@ -329,6 +342,7 @@ class SpServicesClient:
             water_last_month_m3=water_last_month_m3,
             electricity_monthly_history=electricity_monthly_history,
             water_monthly_history=water_monthly_history,
+            electricity_daily_history=electricity_daily_history,
             electricity_hourly_history=electricity_hourly_history,
         )
 
@@ -722,6 +736,16 @@ def _parse_hourly_history(csv_text: str) -> list[UsagePoint]:
     return points
 
 
+def _parse_daily_history_csv(csv_text: str) -> list[UsagePoint]:
+    points: list[UsagePoint] = []
+    for row in _csv_rows(csv_text):
+        period = str(row.get("Period", "")).strip().strip('"')
+        value = _coerce_float(row.get("Current"))
+        if period and value is not None:
+            points.append(UsagePoint(period=period, value=value))
+    return points
+
+
 def _parse_daily_csv(csv_text: str, now: datetime) -> tuple[float | None, float | None]:
     rows = _csv_rows(csv_text)
     if not rows:
@@ -824,6 +848,14 @@ def _section_history_points(rows: list[dict[str, str]]) -> list[UsagePoint]:
         if period and value is not None:
             points.append(UsagePoint(period=period, value=value, status=status))
     return points
+
+
+def _latest_value_for_day(points: list[UsagePoint], now: datetime) -> float | None:
+    target_day = now.date().isoformat()
+    for point in reversed(points):
+        if point.period == target_day:
+            return point.value
+    return None
 
 
 def _period_matches_month(period: str, year: int, month: int) -> bool:

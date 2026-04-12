@@ -8,7 +8,9 @@ from sp_services.client import (
     _extract_csrf,
     _extract_csrf_from_response,
     _extract_primary_account,
+    _latest_value_for_day,
     _parse_daily_csv,
+    _parse_daily_history_csv,
     _parse_hourly_history,
     _parse_monthly_csv,
     _parse_monthly_history,
@@ -158,6 +160,29 @@ Period,Status,Current
             [(point.period, point.value) for point in points],
             [("2026-04-12 00:00:00", 1.2), ("2026-04-12 00:30:00", 0.8)],
         )
+
+    def test_parse_daily_history_csv(self) -> None:
+        csv_text = """Period,Current
+2026-04-11,15.265
+2026-04-12,19.967
+2026-04-13,0.0
+"""
+        points = _parse_daily_history_csv(csv_text)
+        self.assertEqual(
+            [(point.period, point.value) for point in points],
+            [("2026-04-11", 15.265), ("2026-04-12", 19.967), ("2026-04-13", 0.0)],
+        )
+
+    def test_latest_value_for_day(self) -> None:
+        now = datetime(2026, 4, 12, 12, 0, 0)
+        points = _parse_daily_history_csv(
+            """Period,Current
+2026-04-11,15.265
+2026-04-12,19.967
+2026-04-13,0.0
+"""
+        )
+        self.assertEqual(_latest_value_for_day(points, now), 19.967)
 
     def test_parse_daily_csv(self) -> None:
         now = datetime(2026, 4, 12)

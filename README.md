@@ -15,6 +15,7 @@ upstream stability guarantees.
 - current electricity and water summary fields
 - monthly historical electricity and water data where available
 - hourly electricity history from the CSV export endpoint
+- daily electricity history from the CSV export endpoint
 - interactive CLI for real account verification
 - CI with `ruff` and `pytest`
 
@@ -245,6 +246,7 @@ asyncio.run(main())
 - `water_last_month_m3`
 - `electricity_monthly_history`
 - `water_monthly_history`
+- `electricity_daily_history`
 - `electricity_hourly_history`
 
 Historical series are returned as lists of
@@ -255,7 +257,29 @@ Notes on real SP data:
 - monthly files may not contain the current in-progress month yet
 - electricity monthly rows can exist while water monthly rows lag, or vice versa
 - monthly rows include `Status` such as `Actual` or `Estimated`
+- daily exports are separate from half-hourly exports
 - hourly exports appear to be electricity-only in the current SP format
+- daily exports appear to be electricity-only in the current SP format
+
+## Testing
+
+The automated test suite focuses on deterministic parsing and auth helpers, not
+live portal access.
+
+Run it with:
+
+```bash
+uv run pytest
+```
+
+Current coverage includes:
+
+- Auth0 callback and CSRF extraction helpers
+- monthly CSV parsing
+- monthly history parsing with `Status`
+- daily electricity history parsing
+- half-hourly electricity history parsing
+- current-day fallback selection from daily history
 
 ## Development
 

@@ -29,6 +29,7 @@ class UsageData:
     water_last_month_m3: float | None = None
     electricity_monthly_history: list[UsagePoint] | None = None
     water_monthly_history: list[UsagePoint] | None = None
+    electricity_daily_history: list[UsagePoint] | None = None
     electricity_hourly_history: list[UsagePoint] | None = None
 
 

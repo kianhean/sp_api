@@ -12,6 +12,8 @@ The library currently supports:
 - household usage fetches from SP private APIs
 - current usage summary fields
 - monthly historical electricity and water series when available
+- daily electricity history from CSV exports
+- half-hourly electricity history from CSV exports
 
 ## Stack
 
@@ -139,6 +141,14 @@ Primary models:
 - `water_last_month_m3`
 - `electricity_monthly_history`
 - `water_monthly_history`
+- `electricity_daily_history`
+- `electricity_hourly_history`
+
+`UsagePoint` currently exposes:
+
+- `period`
+- `value`
+- `status`
 
 ## Testing Guidance
 
@@ -147,6 +157,9 @@ Automated tests should stay deterministic and avoid live SP network calls.
 Good test targets:
 
 - CSV parsers
+- daily CSV shape handling
+- hourly CSV shape handling
+- monthly CSV status preservation
 - auth helper parsing
 - URL/code extraction
 - response-shape normalization
@@ -175,12 +188,18 @@ automatically.
 - Do not assume Auth0 page structure is stable; verify against live responses.
 - Keep public models backward-compatible when possible.
 - Add tests for any parsing change before considering the change complete.
+- Monthly exports may lag the in-progress month; do not assume the current month
+  is present.
+- Daily and half-hourly exports are different shapes and should stay modeled
+  separately.
+- Monthly rows can contain `Status` values such as `Actual` or `Estimated`;
+  preserve them in public history output.
 
 ## Future Work
 
 Reasonable next improvements:
 
 - persist refresh tokens if SP/Auth0 reliably returns them
-- expose richer daily or hourly electricity history
+- expose water daily history if SP exposes it through a separate endpoint
 - add typed raw-response capture hooks for debugging upstream changes
 - add optional token caching for local CLI reuse
