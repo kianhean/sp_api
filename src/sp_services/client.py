@@ -80,9 +80,10 @@ class _AuthContext:
 class SpServicesClient:
     """Low-level async HTTP client for the SP Services portal."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, debug: bool = False) -> None:
         self._session: niquests.AsyncSession = niquests.AsyncSession()
         self._auth_context: _AuthContext | None = None
+        self._debug = debug
 
     async def __aenter__(self) -> "SpServicesClient":
         return self
@@ -117,7 +118,7 @@ class SpServicesClient:
             timeout=30,
         )
         if resp.status_code == 401:
-            raise AuthenticationError("invalid username or password")
+            raise AuthenticationError(self._format_login_error(resp))
         if not resp.ok:
             raise ApiError(f"SP Services login returned HTTP {resp.status_code}")
 
@@ -390,6 +391,33 @@ class SpServicesClient:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         return headers
+
+    def _format_login_error(self, resp: Any) -> str:
+        message = "invalid username or password"
+        details: list[str] = []
+
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+
+        if isinstance(body, dict):
+            for key in ("error", "error_description", "description", "message", "name"):
+                value = body.get(key)
+                if value:
+                    details.append(f"{key}={value}")
+        else:
+            text = str(getattr(resp, "text", "") or "").strip()
+            if text and self._debug:
+                details.append(f"body={text[:500]}")
+
+        if self._debug:
+            details.append(f"status={resp.status_code}")
+            details.append(f"url={getattr(resp, 'url', '')}")
+            for prev in getattr(resp, "history", []) or []:
+                details.append(f"history_url={getattr(prev, 'url', '')}")
+
+        return f"{message} ({', '.join(details)})" if details else message
 
     @staticmethod
     def _extract_authorization_code(resp: Any, state: str) -> str | None:
