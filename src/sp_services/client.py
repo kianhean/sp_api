@@ -149,7 +149,7 @@ class SpServicesClient:
     async def verify_otp(
         self, otp: str, login_challenge: LoginChallenge | None = None
     ) -> str:
-        """Submit OTP and exchange the resulting authorization code for an access token."""
+        """Submit OTP and exchange it for an access token."""
         context = self._auth_context
         if context is None and login_challenge:
             context = _AuthContext(

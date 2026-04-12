@@ -8,6 +8,27 @@ Async Python client for SP Services household electricity and water usage data.
 uv sync
 ```
 
+## Real E2E Check
+
+This project includes a manual end-to-end runner for verifying the real SP login, SMS OTP flow, and usage download against your account.
+
+Run it with:
+
+```bash
+uv run sp-services-e2e
+```
+
+What it does:
+
+- prompts for your SP username
+- prompts for your password without echoing it
+- starts the OTP flow
+- waits for you to type the SMS OTP
+- exchanges the OTP for a token
+- fetches and prints the current usage payload
+
+This is intentionally manual and interactive. It should not run in CI because it depends on real credentials, a live OTP, and private upstream endpoints.
+
 ## Usage
 
 ```bash
@@ -45,9 +66,10 @@ asyncio.run(main())
 
 ```bash
 uv sync
-uv run python
+uv sync --group dev
 uv run sp-services-demo
-uv run python -m unittest discover -s tests -v
+uv run ruff check .
+uv run pytest
 ```
 
 - This package is unofficial and depends on SP Services private web endpoints, so the flow can break if the upstream site changes.
