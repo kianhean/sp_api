@@ -167,10 +167,10 @@ Period,Status,Current
 2026-04-12,19.967
 2026-04-13,0.0
 """
-        points = _parse_daily_history_csv(csv_text)
+        points = _parse_daily_history_csv(csv_text, datetime(2026, 4, 12))
         self.assertEqual(
             [(point.period, point.value) for point in points],
-            [("2026-04-11", 15.265), ("2026-04-12", 19.967), ("2026-04-13", 0.0)],
+            [("2026-04-11", 15.265), ("2026-04-12", 19.967)],
         )
 
     def test_latest_value_for_day(self) -> None:
@@ -180,7 +180,8 @@ Period,Status,Current
 2026-04-11,15.265
 2026-04-12,19.967
 2026-04-13,0.0
-"""
+""",
+            now,
         )
         self.assertEqual(_latest_value_for_day(points, now), 19.967)
 

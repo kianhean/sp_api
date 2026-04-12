@@ -327,7 +327,7 @@ class SpServicesClient:
             )
         except ApiError:
             daily_summary_csv = ""
-        electricity_daily_history = _parse_daily_history_csv(daily_summary_csv)
+        electricity_daily_history = _parse_daily_history_csv(daily_summary_csv, now)
         if electricity_today is None and electricity_daily_history:
             electricity_today = _latest_value_for_day(electricity_daily_history, now)
 
@@ -736,11 +736,16 @@ def _parse_hourly_history(csv_text: str) -> list[UsagePoint]:
     return points
 
 
-def _parse_daily_history_csv(csv_text: str) -> list[UsagePoint]:
+def _parse_daily_history_csv(
+    csv_text: str, now: datetime | None = None
+) -> list[UsagePoint]:
     points: list[UsagePoint] = []
+    max_day = now.date().isoformat() if now else None
     for row in _csv_rows(csv_text):
         period = str(row.get("Period", "")).strip().strip('"')
         value = _coerce_float(row.get("Current"))
+        if max_day and period and len(period) == 10 and period > max_day:
+            continue
         if period and value is not None:
             points.append(UsagePoint(period=period, value=value))
     return points
