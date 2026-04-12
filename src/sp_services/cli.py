@@ -6,12 +6,13 @@ import asyncio
 import json
 import os
 import traceback
+import webbrowser
 from dataclasses import asdict
 from getpass import getpass
 from pathlib import Path
 
 from .client import SpServicesClient
-from .exceptions import SpServicesError
+from .exceptions import AuthenticationError, SpServicesError
 
 
 def _load_env_file() -> None:
@@ -42,14 +43,33 @@ async def _run() -> None:
 
     try:
         async with SpServicesClient(debug=debug) as client:
-            challenge = await client.login(username, password)
-            if challenge.phone_number:
-                print(f"OTP sent to {challenge.phone_number}")
-            else:
-                print("OTP requested")
+            try:
+                challenge = await client.login(username, password)
+                if challenge.phone_number:
+                    print(f"OTP sent to {challenge.phone_number}")
+                else:
+                    print("OTP requested")
 
-            otp = input("OTP: ").strip()
-            token = await client.verify_otp(otp, challenge)
+                otp = input("OTP: ").strip()
+                token = await client.verify_otp(otp, challenge)
+            except AuthenticationError as err:
+                if "invalid_captcha" not in str(err):
+                    raise
+
+                print("Captcha is required. Switching to browser-assisted login.")
+                auth_url = await client.begin_browser_login()
+                print(
+                    "Open this URL in your browser, complete login and OTP, "
+                    "then paste the final callback URL here:"
+                )
+                print(auth_url)
+                try:
+                    webbrowser.open(auth_url)
+                except Exception:
+                    pass
+                callback_url = input("Callback URL: ").strip()
+                token = await client.exchange_callback_url(callback_url)
+
             usage = await client.fetch_usage(token)
             print(json.dumps(asdict(usage), indent=2, default=str))
     except SpServicesError as err:

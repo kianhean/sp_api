@@ -148,6 +148,41 @@ class SpServicesClient:
             transaction_id=context.transaction_id,
         )
 
+    async def begin_browser_login(self) -> str:
+        """Prepare a browser-based login flow and return the authorize URL."""
+        context = await self._bootstrap_auth()
+        self._auth_context = context
+        return self._authorize_url(
+            oauth_state=context.oauth_state,
+            nonce=context.nonce,
+            code_verifier=context.code_verifier,
+        )
+
+    async def exchange_callback_url(self, callback_url: str) -> str:
+        """Exchange an Auth0 callback URL for an access token."""
+        context = self._auth_context
+        if context is None or not context.oauth_state or not context.code_verifier:
+            raise AuthenticationError("login session is missing; restart login")
+
+        code = _code_from_url(callback_url.strip(), context.oauth_state)
+        if not code:
+            raise AuthenticationError("callback URL did not contain a valid code")
+
+        token_body = await self._post_json(
+            _AUTH0_TOKEN_URL,
+            {
+                "client_id": _AUTH0_CLIENT_ID,
+                "code_verifier": context.code_verifier,
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": _AUTH0_REDIRECT_URI,
+            },
+        )
+        token = token_body.get("access_token")
+        if not token:
+            raise ApiError("SP Services token exchange returned no access token")
+        return str(token)
+
     async def verify_otp(
         self, otp: str, login_challenge: LoginChallenge | None = None
     ) -> str:
@@ -297,23 +332,14 @@ class SpServicesClient:
         oauth_state = _random_token(32)
         nonce = _random_token(32)
         code_verifier = _random_token(48)
-        challenge = _pkce_challenge(code_verifier)
-        params = urlencode(
-            {
-                "client_id": _AUTH0_CLIENT_ID,
-                "redirect_uri": _AUTH0_REDIRECT_URI,
-                "response_type": "code",
-                "scope": _AUTH0_SCOPE,
-                "audience": _AUTH0_AUDIENCE,
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-                "nonce": nonce,
-                "state": oauth_state,
-            }
+        params = self._authorize_params(
+            oauth_state=oauth_state,
+            nonce=nonce,
+            code_verifier=code_verifier,
         )
 
         resp = await self._session.get(
-            f"{_AUTH0_AUTHORIZE_URL}?{params}",
+            f"{_AUTH0_AUTHORIZE_URL}?{urlencode(params)}",
             headers=_HEADERS,
             timeout=30,
         )
@@ -338,6 +364,32 @@ class SpServicesClient:
             code_verifier=code_verifier,
             csrf=csrf,
         )
+
+    def _authorize_params(
+        self, *, oauth_state: str, nonce: str, code_verifier: str
+    ) -> dict[str, str]:
+        challenge = _pkce_challenge(code_verifier)
+        return {
+            "client_id": _AUTH0_CLIENT_ID,
+            "redirect_uri": _AUTH0_REDIRECT_URI,
+            "response_type": "code",
+            "scope": _AUTH0_SCOPE,
+            "audience": _AUTH0_AUDIENCE,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "nonce": nonce,
+            "state": oauth_state,
+        }
+
+    def _authorize_url(
+        self, *, oauth_state: str, nonce: str, code_verifier: str
+    ) -> str:
+        params = self._authorize_params(
+            oauth_state=oauth_state,
+            nonce=nonce,
+            code_verifier=code_verifier,
+        )
+        return f"{_AUTH0_AUTHORIZE_URL}?{urlencode(params)}"
 
     async def _post_json(
         self, url: str, payload: dict[str, Any], token: str | None = None

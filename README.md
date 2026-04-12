@@ -36,6 +36,15 @@ What it does:
 
 This is intentionally manual and interactive. It should not run in CI because it depends on real credentials, a live OTP, and private upstream endpoints.
 
+If the direct login path is blocked by captcha, the CLI will fall back to browser-assisted login:
+
+1. it prints an Auth0 authorize URL
+2. you open it in a browser and complete login, captcha, and OTP
+3. after redirect, copy the full callback URL from the browser
+4. paste that callback URL into the CLI
+
+The client will then exchange the authorization code and continue fetching usage.
+
 ## Usage
 
 ```bash

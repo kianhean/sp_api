@@ -38,6 +38,10 @@ class TestClientHelpers(unittest.TestCase):
         self.assertEqual(_code_from_url(url, "expected"), "auth-code")
         self.assertIsNone(_code_from_url(url, "other"))
 
+    def test_code_from_url_without_state_still_uses_code(self) -> None:
+        url = "https://services.spservices.sg/callback?code=auth-code"
+        self.assertEqual(_code_from_url(url, "expected"), "auth-code")
+
     def test_extract_primary_account(self) -> None:
         payload = {
             "data": {
