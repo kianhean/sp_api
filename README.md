@@ -252,6 +252,89 @@ asyncio.run(main())
 Historical series are returned as lists of
 `UsagePoint(period, value, status=None)`.
 
+### What The Fields Mean
+
+- `electricity_today_kwh`
+  Best available electricity usage total for the current day. This may come
+  from the live hourly payload or from the daily CSV fallback.
+- `electricity_month_kwh`
+  Best available electricity total for the current month. This can be `null`
+  when SP has not yet published the current month in its monthly dataset.
+- `water_today_m3`
+  Current-day water usage. This is often unavailable in the current SP data
+  sources and may be `null`.
+- `water_month_m3`
+  Best available water total for the current month. This can be `null` when SP
+  has not yet published the current month in its monthly dataset.
+- `account_no`
+  The SP account number selected from the linked household accounts.
+- `last_updated`
+  Local timestamp for when the library fetched and assembled the payload.
+- `electricity_last_month_kwh`
+  Last published monthly electricity total from the monthly CSV history.
+- `water_last_month_m3`
+  Last published monthly water total from the monthly CSV history.
+- `electricity_monthly_history`
+  Monthly electricity series from the SP monthly CSV export.
+- `water_monthly_history`
+  Monthly water series from the SP monthly CSV export.
+- `electricity_daily_history`
+  Daily electricity series from the SP daily CSV export.
+- `electricity_hourly_history`
+  Half-hourly electricity series from the SP hourly CSV export.
+
+### UsagePoint Shape
+
+Each history item is a `UsagePoint` with:
+
+- `period`
+  The time bucket label exactly as returned by SP, for example
+  `2026-03-01`, `2026-04-12`, or `2026-04-12 00:30:00`.
+- `value`
+  The numeric consumption value for that period.
+- `status`
+  Optional metadata from SP. This is mainly present in monthly history and can
+  be values such as `Actual` or `Estimated`.
+
+### Example Output
+
+```json
+{
+  "electricity_today_kwh": 19.967,
+  "electricity_month_kwh": null,
+  "water_today_m3": null,
+  "water_month_m3": null,
+  "account_no": "8949049293",
+  "last_updated": "2026-04-12 16:42:41.245935",
+  "electricity_last_month_kwh": 572.0,
+  "water_last_month_m3": 34.1,
+  "electricity_monthly_history": [
+    {"period": "2026-03-01", "value": 572.0, "status": "Actual"}
+  ],
+  "water_monthly_history": [
+    {"period": "2026-03-01", "value": 34.1, "status": "Estimated"}
+  ],
+  "electricity_daily_history": [
+    {"period": "2026-04-11", "value": 15.265, "status": null},
+    {"period": "2026-04-12", "value": 19.967, "status": null}
+  ],
+  "electricity_hourly_history": [
+    {"period": "2026-04-12 00:00:00", "value": 1.452, "status": null},
+    {"period": "2026-04-12 00:30:00", "value": 1.356, "status": null}
+  ]
+}
+```
+
+### Why Some Values Can Be `null`
+
+`null` does not always mean the parser failed. In practice it can mean:
+
+- SP has not published the current month yet in the monthly export
+- the current endpoint does not expose that utility at that granularity
+- the source dataset exists for electricity but not for water
+- the live JSON payload is missing the field and the CSV fallback also does not
+  contain a usable value
+
 Notes on real SP data:
 
 - monthly files may not contain the current in-progress month yet
