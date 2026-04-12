@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import niquests
 
 from .exceptions import ApiError, AuthenticationError, SessionExpiredError
-from .models import LoginChallenge, UsageData
+from .models import LoginChallenge, UsageData, UsagePoint
 
 _BASE_URL = "https://services.spservices.sg"
 _AUTH0_BASE_URL = "https://identity.spdigital.auth0.com"
@@ -280,6 +280,7 @@ class SpServicesClient:
         water_today: float | None = None
         electricity_last_month_kwh: float | None = None
         water_last_month_m3: float | None = None
+        electricity_hourly_history: list[UsagePoint] = []
 
         monthly_csv = await self._post_text(
             _SKALBOX_MONTHLY_CSV_URL,
@@ -296,19 +297,23 @@ class SpServicesClient:
             electricity_last_month_kwh,
             water_last_month_m3,
         ) = _parse_monthly_csv(monthly_csv, now)
+        electricity_monthly_history, water_monthly_history = _parse_monthly_history(
+            monthly_csv
+        )
         if electricity_month is None or water_month is None:
             electricity_month = (
                 electricity_month if electricity_month is not None else csv_elec_month
             )
             water_month = water_month if water_month is not None else csv_water_month
 
+        daily_csv = await self._post_text(
+            _SKALBOX_DAILY_CSV_URL,
+            {"accountNos": [account_no], "consumptionBy": "hourCSV"},
+            token=token,
+        )
+        csv_elec_today, _ = _parse_daily_csv(daily_csv, now)
+        electricity_hourly_history = _parse_hourly_history(daily_csv)
         if electricity_today is None:
-            daily_csv = await self._post_text(
-                _SKALBOX_DAILY_CSV_URL,
-                {"accountNos": [account_no], "consumptionBy": "hourCSV"},
-                token=token,
-            )
-            csv_elec_today, _ = _parse_daily_csv(daily_csv, now)
             electricity_today = (
                 electricity_today if electricity_today is not None else csv_elec_today
             )
@@ -322,6 +327,9 @@ class SpServicesClient:
             last_updated=now,
             electricity_last_month_kwh=electricity_last_month_kwh,
             water_last_month_m3=water_last_month_m3,
+            electricity_monthly_history=electricity_monthly_history,
+            water_monthly_history=water_monthly_history,
+            electricity_hourly_history=electricity_hourly_history,
         )
 
     async def close(self) -> None:
@@ -682,21 +690,36 @@ def _parse_monthly_csv(
     csv_text: str, now: datetime
 ) -> tuple[float | None, float | None, float | None, float | None]:
     sections = _parse_titled_csv_sections(csv_text)
-    target_month = now.replace(day=1).date().isoformat()
     previous_month = (now.replace(day=1) - timedelta(days=1)).replace(day=1)
-    previous_month_period = previous_month.date().isoformat()
 
-    electricity = _section_value_for_period(
-        sections.get("electricity", []), target_month
+    electricity = _section_value_for_month(
+        sections.get("electricity", []), now.year, now.month
     )
-    water = _section_value_for_period(sections.get("water", []), target_month)
-    electricity_last_month = _section_value_for_period(
-        sections.get("electricity", []), previous_month_period
+    water = _section_value_for_month(sections.get("water", []), now.year, now.month)
+    electricity_last_month = _section_value_for_month(
+        sections.get("electricity", []), previous_month.year, previous_month.month
     )
-    water_last_month = _section_value_for_period(
-        sections.get("water", []), previous_month_period
+    water_last_month = _section_value_for_month(
+        sections.get("water", []), previous_month.year, previous_month.month
     )
     return electricity, water, electricity_last_month, water_last_month
+
+
+def _parse_monthly_history(csv_text: str) -> tuple[list[UsagePoint], list[UsagePoint]]:
+    sections = _parse_titled_csv_sections(csv_text)
+    electricity = _section_history_points(sections.get("electricity", []))
+    water = _section_history_points(sections.get("water", []))
+    return electricity, water
+
+
+def _parse_hourly_history(csv_text: str) -> list[UsagePoint]:
+    points: list[UsagePoint] = []
+    for row in _csv_rows(csv_text):
+        period = str(row.get("Period", "")).strip().strip('"')
+        value = _coerce_float(row.get("Current"))
+        if period and value is not None:
+            points.append(UsagePoint(period=period, value=value))
+    return points
 
 
 def _parse_daily_csv(csv_text: str, now: datetime) -> tuple[float | None, float | None]:
@@ -765,6 +788,64 @@ def _section_value_for_period(rows: list[dict[str, str]], period: str) -> float 
         if row_period == period:
             return _coerce_float(row.get("Current"))
     return None
+
+
+def _section_value_for_month(
+    rows: list[dict[str, str]], year: int, month: int
+) -> float | None:
+    matched_values: list[tuple[str, float]] = []
+    fallback_exact = _section_value_for_period(
+        rows, datetime(year, month, 1).date().isoformat()
+    )
+    if fallback_exact is not None:
+        return fallback_exact
+
+    for row in rows:
+        row_period = str(row.get("Period", "")).strip().strip('"')
+        if not _period_matches_month(row_period, year, month):
+            continue
+        value = _coerce_float(row.get("Current"))
+        if value is not None:
+            matched_values.append((row_period, value))
+
+    if not matched_values:
+        return None
+
+    matched_values.sort(key=lambda item: item[0])
+    return matched_values[-1][1]
+
+
+def _section_history_points(rows: list[dict[str, str]]) -> list[UsagePoint]:
+    points: list[UsagePoint] = []
+    for row in rows:
+        period = str(row.get("Period", "")).strip().strip('"')
+        value = _coerce_float(row.get("Current"))
+        status = str(row.get("Status", "")).strip().strip('"') or None
+        if period and value is not None:
+            points.append(UsagePoint(period=period, value=value, status=status))
+    return points
+
+
+def _period_matches_month(period: str, year: int, month: int) -> bool:
+    normalized = period.strip().strip('"')
+    month_num = f"{month:02d}"
+    month_short = datetime(year, month, 1).strftime("%b").lower()
+    month_long = datetime(year, month, 1).strftime("%B").lower()
+    year_short = str(year)[-2:]
+    lowered = normalized.lower()
+
+    patterns = (
+        f"{year}-{month_num}",
+        f"{year}/{month_num}",
+        f"{month_num}/{year}",
+        f"{month_num}-{year}",
+        f"{year}{month_num}",
+        f"{month_short}-{year_short}",
+        f"{month_short}-{year}",
+        f"{month_short} {year}",
+        f"{month_long} {year}",
+    )
+    return any(pattern in lowered for pattern in patterns)
 
 
 def _coerce_float(value: Any) -> float | None:

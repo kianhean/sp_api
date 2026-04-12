@@ -9,8 +9,11 @@ from sp_services.client import (
     _extract_csrf_from_response,
     _extract_primary_account,
     _parse_daily_csv,
+    _parse_hourly_history,
     _parse_monthly_csv,
+    _parse_monthly_history,
     _parse_monthly_usage,
+    _period_matches_month,
 )
 
 
@@ -93,6 +96,67 @@ Period,Current
         self.assertEqual(
             _parse_monthly_csv(csv_text, now),
             (321.5, 12.75, 300.0, 11.25),
+        )
+
+    def test_parse_monthly_csv_accepts_current_month_partial_dates(self) -> None:
+        now = datetime(2026, 4, 12)
+        csv_text = """Electricity
+Period,Current
+2026-04-12,321.5
+2026-03-31,300.0
+
+Water
+Period,Current
+Apr 2026,12.75
+Mar 2026,11.25
+"""
+        self.assertEqual(
+            _parse_monthly_csv(csv_text, now),
+            (321.5, 12.75, 300.0, 11.25),
+        )
+
+    def test_period_matches_month(self) -> None:
+        self.assertTrue(_period_matches_month("2026-04-12", 2026, 4))
+        self.assertTrue(_period_matches_month("Apr 2026", 2026, 4))
+        self.assertTrue(_period_matches_month("04/2026", 2026, 4))
+        self.assertFalse(_period_matches_month("2026-03-31", 2026, 4))
+
+    def test_parse_monthly_history(self) -> None:
+        csv_text = """Electricity
+Period,Status,Current
+2026-04-01,Actual,321.5
+2026-03-01,Estimated,300.0
+
+Water
+Period,Status,Current
+2026-04-01,Actual,12.75
+2026-03-01,Estimated,11.25
+"""
+        electricity, water = _parse_monthly_history(csv_text)
+        self.assertEqual(
+            [(point.period, point.status, point.value) for point in electricity],
+            [
+                ("2026-04-01", "Actual", 321.5),
+                ("2026-03-01", "Estimated", 300.0),
+            ],
+        )
+        self.assertEqual(
+            [(point.period, point.status, point.value) for point in water],
+            [
+                ("2026-04-01", "Actual", 12.75),
+                ("2026-03-01", "Estimated", 11.25),
+            ],
+        )
+
+    def test_parse_hourly_history(self) -> None:
+        csv_text = """Period,Current
+2026-04-12 00:00:00,1.2
+2026-04-12 00:30:00,0.8
+"""
+        points = _parse_hourly_history(csv_text)
+        self.assertEqual(
+            [(point.period, point.value) for point in points],
+            [("2026-04-12 00:00:00", 1.2), ("2026-04-12 00:30:00", 0.8)],
         )
 
     def test_parse_daily_csv(self) -> None:

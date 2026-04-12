@@ -7,6 +7,15 @@ from datetime import datetime
 
 
 @dataclass(slots=True)
+class UsagePoint:
+    """Single historical usage data point."""
+
+    period: str
+    value: float
+    status: str | None = None
+
+
+@dataclass(slots=True)
 class UsageData:
     """Household utility consumption data fetched from SP Services."""
 
@@ -18,6 +27,9 @@ class UsageData:
     last_updated: datetime
     electricity_last_month_kwh: float | None = None
     water_last_month_m3: float | None = None
+    electricity_monthly_history: list[UsagePoint] | None = None
+    water_monthly_history: list[UsagePoint] | None = None
+    electricity_hourly_history: list[UsagePoint] | None = None
 
 
 @dataclass(slots=True)
