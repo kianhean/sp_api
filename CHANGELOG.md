@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 2.0.0 - 2026-07-29
+
+### Breaking
+
+- The runtime dependency is now `requests` instead of `niquests`. The public API
+  is unchanged and still async; calls are dispatched through
+  `asyncio.to_thread` so they do not block the caller's event loop.
+- `UsageData.last_updated` is now timezone-aware (`Asia/Singapore`). Comparing
+  it against a naive `datetime` will raise.
+- `UsagePoint.value` is now `float | None`. Consumers doing arithmetic on it
+  directly must handle `None`.
+- An authorization code is only accepted when the OAuth `state` is present and
+  matches. Callback URLs without a `state` parameter are now rejected.
+- Summary values may differ from 1.0.0 where period matching was previously
+  wrong; see Fixed below.
 
 ### Added
 
@@ -11,15 +25,14 @@
 
 ### Changed
 
-- HTTP transport moved from `niquests` to `requests`, dispatched through
-  `asyncio.to_thread` so the async API stays non-blocking
-- All date logic is pinned to `Asia/Singapore` instead of the host clock, and
-  `UsageData.last_updated` is now timezone-aware
-- `UsagePoint.value` is now optional, so a period SP published with a status but
-  no figure is preserved instead of dropped
-- Every CSV export fetch now degrades to empty on upstream failure; expired
+- All "today" and "this month" decisions are made in `Asia/Singapore` rather
+  than on the host clock, so a UTC-clocked host no longer reports the previous
+  day's usage between midnight and 08:00 SGT
+- A period SP published with a status but no figure is preserved with
+  `value=None` instead of being dropped from history
+- Every CSV export fetch degrades to empty on upstream failure; expired
   sessions still propagate
-- Transport failures now raise `ApiError` instead of escaping as library errors
+- Transport failures raise `ApiError` instead of escaping as library errors
 
 ### Fixed
 
