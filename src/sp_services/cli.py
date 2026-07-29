@@ -83,6 +83,21 @@ async def _run(save_json: str | None = None) -> None:
                 callback_url = input("Callback URL: ").strip()
                 token = await client.exchange_callback_url(callback_url)
 
+            token_set = client.token_set
+            if token_set is not None:
+                if token_set.refresh_token:
+                    print(
+                        "Refresh token obtained; it can be persisted for "
+                        "unattended re-authentication."
+                    )
+                else:
+                    print(
+                        "No refresh token returned; re-authentication will "
+                        "require another interactive login."
+                    )
+                if token_set.expires_at:
+                    print(f"Access token expires at {token_set.expires_at.isoformat()}")
+
             usage = await client.fetch_usage(token)
             payload = json.dumps(asdict(usage), indent=2, default=str)
             print(payload)

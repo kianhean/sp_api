@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 
 @dataclass(slots=True)
 class UsagePoint:
-    """Single historical usage data point."""
+    """Single historical usage data point.
+
+    ``value`` is ``None`` when SP published the period (usually with a
+    ``status`` such as ``Estimated``) but no consumption figure for it.
+    """
 
     period: str
-    value: float
+    value: float | None
     status: str | None = None
 
 
@@ -31,6 +35,31 @@ class UsageData:
     water_monthly_history: list[UsagePoint] | None = None
     electricity_daily_history: list[UsagePoint] | None = None
     electricity_hourly_history: list[UsagePoint] | None = None
+
+
+@dataclass(slots=True)
+class TokenSet:
+    """OAuth tokens returned by the Auth0 token endpoint.
+
+    ``refresh_token`` is only present when SP/Auth0 honours the
+    ``offline_access`` scope. Callers that need unattended re-authentication
+    (for example a long-running Home Assistant integration) should persist it
+    and pass it to :meth:`SpServicesClient.refresh_access_token`.
+    """
+
+    access_token: str
+    refresh_token: str | None = None
+    expires_at: datetime | None = None
+    token_type: str = "Bearer"
+    scope: str | None = None
+
+    def is_expired(self, *, leeway_seconds: int = 60) -> bool:
+        """Return whether the access token is expired or about to expire."""
+        if self.expires_at is None:
+            return False
+        return datetime.now(timezone.utc) >= self.expires_at - timedelta(
+            seconds=leeway_seconds
+        )
 
 
 @dataclass(slots=True)
