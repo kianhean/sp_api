@@ -7,7 +7,7 @@ from .exceptions import (
     SessionExpiredError,
     SpServicesError,
 )
-from .models import LoginChallenge, UsageData, UsagePoint
+from .models import LoginChallenge, TokenSet, UsageData, UsagePoint
 
 __all__ = [
     "ApiError",
@@ -16,6 +16,7 @@ __all__ = [
     "SessionExpiredError",
     "SpServicesClient",
     "SpServicesError",
+    "TokenSet",
     "UsageData",
     "UsagePoint",
 ]

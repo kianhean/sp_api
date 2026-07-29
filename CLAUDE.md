@@ -20,7 +20,8 @@ The library currently supports:
 - Python `>=3.11`
 - package manager: `uv`
 - build backend: `setuptools`
-- HTTP client: `niquests`
+- HTTP client: `requests`, dispatched via `asyncio.to_thread` so the public
+  async API never blocks the caller's event loop
 - lint: `ruff`
 - tests: `pytest`
 
@@ -118,14 +119,20 @@ Main methods:
 - `verify_otp(otp, login_challenge=None)`
 - `begin_browser_login()`
 - `exchange_callback_url(callback_url)`
-- `fetch_usage(token)`
+- `refresh_access_token(refresh_token=None)`
+- `fetch_usage(token, account_no=None)`
 - `close()`
+
+Primary properties:
+
+- `token_set`
 
 Primary models:
 
 - `UsageData`
 - `UsagePoint`
 - `LoginChallenge`
+- `TokenSet`
 
 ## UsageData Shape
 
@@ -194,6 +201,14 @@ automatically.
   separately.
 - Monthly rows can contain `Status` values such as `Actual` or `Estimated`;
   preserve them in public history output.
+- All date logic must use `_now_sp()` (`Asia/Singapore`), never `datetime.now()`
+  on the host clock.
+- Period labels must be matched with `_period_matches_month` /
+  `_period_matches_day`, never with bare digit substrings.
+- The OAuth `state` must always be verified when extracting an authorization
+  code; never accept a code from a callback that omits it.
+- `UsagePoint.value` is optional; periods SP publishes with a status but no
+  figure are preserved with `value=None`.
 
 ## Future Work
 

@@ -228,13 +228,42 @@ asyncio.run(main())
 - `SpServicesClient.verify_otp(otp, login_challenge=None)`
 - `SpServicesClient.begin_browser_login()`
 - `SpServicesClient.exchange_callback_url(callback_url)`
-- `SpServicesClient.fetch_usage(token)`
+- `SpServicesClient.refresh_access_token(refresh_token=None)`
+- `SpServicesClient.fetch_usage(token, account_no=None)`
+- `SpServicesClient.token_set`
+
+`fetch_usage` uses the first linked account unless `account_no` is given.
 
 ### Models
 
 - `LoginChallenge`
+- `TokenSet`
 - `UsageData`
 - `UsagePoint`
+
+### Tokens And Re-Authentication
+
+Every successful exchange stores a `TokenSet` on the client:
+
+```python
+token = await client.exchange_callback_url(callback_url)
+tokens = client.token_set
+
+if tokens.refresh_token and tokens.is_expired():
+    tokens = await client.refresh_access_token(tokens.refresh_token)
+```
+
+The library requests the `offline_access` scope, so Auth0 usually returns a
+refresh token. Persist it if you need unattended re-authentication; without one
+the only way back is another interactive browser login. `refresh_access_token`
+keeps the existing refresh token when Auth0 does not rotate it.
+
+### Timezone
+
+All "today" and "this month" decisions are made in `Asia/Singapore`, regardless
+of the host clock, and `last_updated` is timezone-aware. Period strings in the
+history series are returned exactly as SP publishes them and are Singapore local
+time.
 
 ## Returned Data
 
@@ -273,7 +302,8 @@ Historical series are returned as lists of
 - `account_no`
   The SP account number selected from the linked household accounts.
 - `last_updated`
-  Local timestamp for when the library fetched and assembled the payload.
+  Timezone-aware (`Asia/Singapore`) timestamp for when the library fetched and
+  assembled the payload.
 - `electricity_last_month_kwh`
   Last published monthly electricity total from the monthly CSV history.
 - `water_last_month_m3`
@@ -295,7 +325,8 @@ Each history item is a `UsagePoint` with:
   The time bucket label exactly as returned by SP, for example
   `2026-03-01`, `2026-04-12`, or `2026-04-12 00:30:00`.
 - `value`
-  The numeric consumption value for that period.
+  The numeric consumption value for that period, or `null` when SP published
+  the period without a figure.
 - `status`
   Optional metadata from SP. This is mainly present in monthly history and can
   be values such as `Actual` or `Estimated`.
@@ -309,7 +340,7 @@ Each history item is a `UsagePoint` with:
   "water_today_m3": null,
   "water_month_m3": null,
   "account_no": "8949049293",
-  "last_updated": "2026-04-12 16:42:41.245935",
+  "last_updated": "2026-04-12 16:42:41.245935+08:00",
   "electricity_last_month_kwh": 572.0,
   "water_last_month_m3": 34.1,
   "electricity_monthly_history": [
@@ -347,6 +378,41 @@ Notes on real SP data:
 - daily exports are separate from half-hourly exports
 - hourly exports appear to be electricity-only in the current SP format
 - daily exports appear to be electricity-only in the current SP format
+
+## Using This In Home Assistant
+
+The library is usable from a custom integration, with some caveats worth
+knowing before you build one.
+
+What is already suited to it:
+
+- `fetch_usage` is a single async call returning one immutable snapshot, which
+  maps cleanly onto a `DataUpdateCoordinator`
+- `SessionExpiredError` on an expired token maps to `ConfigEntryAuthFailed`, and
+  `ApiError` maps to `UpdateFailed`; a missing CSV export degrades to `None`
+  fields instead of failing the whole update
+- all date logic is pinned to `Asia/Singapore` and `last_updated` is
+  timezone-aware, so a UTC-clocked host reports the correct day
+
+What you still need to handle yourself:
+
+- **Re-authentication.** Persist `client.token_set.refresh_token` in the config
+  entry and call `refresh_access_token` before it expires. If SP declines to
+  return a refresh token, the integration will need a reauth flow that walks the
+  user through the browser login again — there is no unattended path without it.
+- **Poll interval.** One `fetch_usage` makes up to six upstream requests and SP
+  refreshes this data slowly. Poll no more often than every 15–30 minutes.
+- **HTTP client.** This library uses `requests` on a worker thread (via
+  `asyncio.to_thread`) and manages its own session, so it never blocks the
+  event loop but also does not share Home Assistant's `aiohttp` session. That is
+  fine for a custom/HACS integration; Home Assistant Core review prefers a
+  natively async client such as `aiohttp` or `httpx`.
+- **Statistics.** The history series are consumption per bucket, not monotonic
+  meter readings. Convert to increasing sums before feeding
+  `async_add_external_statistics`, and localize the naive period strings to
+  `Asia/Singapore` first.
+- **Unstable upstream.** These are private endpoints with no compatibility
+  guarantee. Treat a parsing gap as `None` rather than an entity error.
 
 ## Testing
 
