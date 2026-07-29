@@ -381,38 +381,101 @@ Notes on real SP data:
 
 ## Using This In Home Assistant
 
-The library is usable from a custom integration, with some caveats worth
-knowing before you build one.
+The library is usable from a custom integration. Read this section before
+building one — the login flow, not the data parsing, is what makes or breaks it.
 
-What is already suited to it:
+### Check This First: Does SP Return A Refresh Token?
 
-- `fetch_usage` is a single async call returning one immutable snapshot, which
-  maps cleanly onto a `DataUpdateCoordinator`
-- `SessionExpiredError` on an expired token maps to `ConfigEntryAuthFailed`, and
-  `ApiError` maps to `UpdateFailed`; a missing CSV export degrades to `None`
-  fields instead of failing the whole update
-- all date logic is pinned to `Asia/Singapore` and `last_updated` is
-  timezone-aware, so a UTC-clocked host reports the correct day
+This is the one thing worth confirming before writing any integration code.
 
-What you still need to handle yourself:
+The login flow is browser + captcha + OTP. That is fine once, during config
+flow, but Home Assistant polls for months and Auth0 access tokens typically last
+hours. Without a refresh token every expiry drops the integration into a broken
+state that only a human pasting a callback URL can fix.
 
-- **Re-authentication.** Persist `client.token_set.refresh_token` in the config
-  entry and call `refresh_access_token` before it expires. If SP declines to
-  return a refresh token, the integration will need a reauth flow that walks the
-  user through the browser login again — there is no unattended path without it.
-- **Poll interval.** One `fetch_usage` makes up to six upstream requests and SP
-  refreshes this data slowly. Poll no more often than every 15–30 minutes.
-- **HTTP client.** This library uses `requests` on a worker thread (via
-  `asyncio.to_thread`) and manages its own session, so it never blocks the
-  event loop but also does not share Home Assistant's `aiohttp` session. That is
-  fine for a custom/HACS integration; Home Assistant Core review prefers a
-  natively async client such as `aiohttp` or `httpx`.
-- **Statistics.** The history series are consumption per bucket, not monotonic
-  meter readings. Convert to increasing sums before feeding
-  `async_add_external_statistics`, and localize the naive period strings to
-  `Asia/Singapore` first.
-- **Unstable upstream.** These are private endpoints with no compatibility
-  guarantee. Treat a parsing gap as `None` rather than an entity error.
+The library requests the `offline_access` scope, so Auth0 should return a
+refresh token — but this is a private SP deployment and that is not guaranteed.
+Verify against your own account:
+
+```bash
+uv run sp-services-e2e
+```
+
+The CLI prints whether a refresh token was returned and when the access token
+expires. If it reports one, the unattended path below works. If it does not, no
+amount of integration code fixes it: plan for a reauth flow that walks the user
+through the browser login again whenever the token dies.
+
+### Token Handling
+
+Persist the refresh token in the config entry and refresh before expiry:
+
+```python
+tokens = client.token_set          # after exchange_callback_url / verify_otp
+entry.data["refresh_token"]        # persist tokens.refresh_token here
+
+# later, before each update
+if tokens.is_expired():
+    tokens = await client.refresh_access_token(stored_refresh_token)
+```
+
+`refresh_access_token` keeps the existing refresh token when Auth0 does not
+rotate it, so a stored value stays valid across refreshes. `is_expired()`
+applies a 60-second leeway by default.
+
+### Coordinator And Error Mapping
+
+`fetch_usage` is a single async call returning one immutable snapshot, which
+maps cleanly onto a `DataUpdateCoordinator`. The exception hierarchy lines up
+with Home Assistant's:
+
+```python
+try:
+    return await client.fetch_usage(token, account_no=entry.data["account_no"])
+except SessionExpiredError as err:
+    raise ConfigEntryAuthFailed from err
+except SpServicesError as err:
+    raise UpdateFailed(str(err)) from err
+```
+
+A CSV export that fails upstream degrades to `None` fields rather than failing
+the whole update, so one flaky endpoint will not red-line every entity.
+
+### Poll Interval
+
+One `fetch_usage` makes up to six upstream requests against private endpoints,
+and SP refreshes this data slowly. Poll every 15–30 minutes — not the
+coordinator default.
+
+### Entities Worth Creating
+
+- `water_today_m3` is always `None`. SP does not publish same-day water usage in
+  any observed export, so do not create that sensor.
+- `electricity_month_kwh` and `water_month_m3` are `null` until SP publishes the
+  in-progress month. Model them as unavailable, not zero.
+- `UsagePoint.value` is optional; a period SP published with a status but no
+  figure comes back with `value=None`.
+
+### Energy Dashboard Statistics
+
+The history series are consumption per bucket, not monotonic meter readings.
+Convert to running sums before feeding `async_add_external_statistics`, and
+localize the period strings first — they are naive strings in Singapore local
+time, exactly as SP publishes them.
+
+### HTTP Client
+
+This library uses `requests` on a worker thread (via `asyncio.to_thread`), so it
+never blocks the event loop, but it manages its own session and will not share
+Home Assistant's `aiohttp` session. That is fine for a custom or HACS
+integration. Home Assistant Core review prefers a natively async client such as
+`aiohttp` or `httpx`, so expect pushback if you submit upstream.
+
+### Upstream Stability
+
+These are private endpoints with no compatibility guarantee. Treat a parsing gap
+as `None` rather than an entity error, and expect to update the library when SP
+changes its export shapes.
 
 ## Testing
 
