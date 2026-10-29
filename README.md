@@ -15,7 +15,9 @@ upstream stability guarantees.
 
 - Auth0-based login support for SP Services
 - OTP verification flow
-- browser-assisted fallback when captcha blocks headless login
+- automatic browser login: complete captcha and OTP in your own Chrome/Edge
+  window, with no callback URL to copy
+- saved refresh token so later CLI runs skip the login entirely
 - current electricity and water summary fields
 - monthly historical electricity and water data where available
 - hourly electricity history from the CSV export endpoint
@@ -52,13 +54,18 @@ Example:
 SP_SERVICES_USERNAME=your-email@example.com
 SP_SERVICES_PASSWORD=your-password
 SP_SERVICES_DEBUG=0
+# optional: browser used for automatic login (Chrome, Edge, Chromium, Brave)
+SP_SERVICES_BROWSER=
 ```
 
 Notes:
 
 - `.env` is gitignored.
 - `SP_SERVICES_DEBUG=1` enables more verbose auth failure output.
-- username and password are optional if you use the browser-assisted flow.
+- username and password are optional. Without them the CLI goes straight to
+  the browser login, because SP enforces captcha on the direct login anyway.
+- `SP_SERVICES_BROWSER` is only needed if your browser is installed somewhere
+  unusual.
 
 ## Real E2E Check
 
@@ -76,11 +83,15 @@ uv run sp-services-e2e --save-json usage.json
 
 The CLI will:
 
-- read credentials from `.env` if present
-- try the direct login flow first
-- fall back to browser-assisted login if captcha is required
-- exchange the resulting authorization code
+- reuse the refresh token saved by a previous run in `.sp_services_tokens.json`
+  (gitignored, owner-only permissions), skipping the login entirely
+- otherwise try the direct login flow if credentials are in `.env`
+- fall back to the automatic browser login when captcha is required
+- exchange the resulting authorization code and save the new tokens
 - fetch and print usage data as JSON
+
+Use `--token-cache PATH` to keep the tokens elsewhere, or `--no-token-cache` to
+neither read nor write them.
 
 ### Browser-Assisted Login
 
@@ -89,16 +100,21 @@ SP Services currently enforces captcha on the direct Auth0
 
 When that happens, the CLI will:
 
-1. print an Auth0 authorize URL
-2. optionally try to open it in your default browser
-3. let you complete captcha, login, and OTP in the browser
-4. ask you to paste the final callback URL
-5. exchange that callback for an access token
-6. continue fetching usage data
+1. open a Chrome, Edge, Chromium or Brave window with a throwaway profile
+2. let you complete captcha, login, and OTP in that window
+3. capture the callback automatically and show "Login complete"
+4. exchange that callback for an access token
+5. continue fetching usage data
 
-This is the intended manual verification path for real accounts.
+Nothing needs to be copied or pasted. The window is driven over the Chrome
+DevTools Protocol using only the Python standard library, so no extra packages
+are required. The callback request is intercepted inside the browser, so the
+authorization code never reaches SP's own page. The temporary profile is
+deleted afterwards.
 
-### How To Capture The Callback URL
+If no supported browser is found, the CLI falls back to the manual flow below.
+
+### Manual Fallback: Capturing The Callback URL
 
 After you complete login, captcha, and OTP in the browser, SP Services may
 redirect immediately away from the Auth0 callback page. In many cases the final
@@ -176,7 +192,28 @@ Firefox:
 
 ## Library Usage
 
-### Browser-Assisted Flow
+### Automatic Browser Flow
+
+```python
+import asyncio
+
+from sp_services import SpServicesClient
+
+
+async def main() -> None:
+    async with SpServicesClient() as client:
+        token = await client.login_with_browser()
+        usage = await client.fetch_usage(token)
+        print(usage)
+
+
+asyncio.run(main())
+```
+
+`login_with_browser()` raises `BrowserNotFoundError` when no supported browser
+is installed; use the manual flow below in that case.
+
+### Manual Browser Flow
 
 ```python
 import asyncio
@@ -226,6 +263,7 @@ asyncio.run(main())
 
 - `SpServicesClient.login(username, password)`
 - `SpServicesClient.verify_otp(otp, login_challenge=None)`
+- `SpServicesClient.login_with_browser(browser_path=None, timeout=600)`
 - `SpServicesClient.begin_browser_login()`
 - `SpServicesClient.exchange_callback_url(callback_url)`
 - `SpServicesClient.refresh_access_token(refresh_token=None)`

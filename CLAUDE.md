@@ -29,6 +29,9 @@ The library currently supports:
 
 - `src/sp_services/client.py`
   Core auth, token exchange, API requests, and parsing helpers.
+- `src/sp_services/browser.py`
+  Stdlib-only Chrome DevTools Protocol helper that captures the Auth0 callback
+  from the user's own browser.
 - `src/sp_services/models.py`
   Public data models returned by the client.
 - `src/sp_services/exceptions.py`
@@ -84,6 +87,7 @@ Supported values:
 SP_SERVICES_USERNAME=
 SP_SERVICES_PASSWORD=
 SP_SERVICES_DEBUG=0
+SP_SERVICES_BROWSER=
 ```
 
 Notes:
@@ -91,21 +95,29 @@ Notes:
 - `SP_SERVICES_USERNAME` and `SP_SERVICES_PASSWORD` are optional if you use the
   browser-assisted flow.
 - `SP_SERVICES_DEBUG=1` enables more verbose auth error output.
+- `SP_SERVICES_BROWSER` overrides browser discovery for automatic login.
 
 ## Authentication Notes
 
 SP Services currently enforces captcha on the direct Auth0 username/password
 login endpoint. Because of that, pure headless login is not reliable.
 
-The supported fallback is:
+The supported flow is `login_with_browser()`:
 
-1. start the CLI
-2. let it print an Auth0 authorize URL
-3. complete captcha, login, and OTP in a browser
-4. paste the final callback URL back into the CLI
+1. it opens an installed Chrome/Edge/Chromium/Brave with a throwaway profile
+2. the user completes captcha, login, and OTP in that window
+3. the callback request is intercepted over the DevTools Protocol, so nothing
+   is pasted and SP's page never receives the code
 
 The library then exchanges the authorization code for an access token and
-continues with API calls.
+continues with API calls. If no browser is found, the CLI falls back to
+printing the authorize URL and asking for the callback URL to be pasted.
+
+The CLI caches tokens in `.sp_services_tokens.json` and reuses the refresh
+token, so later runs skip the login. Never print or log refresh tokens.
+
+Keep `browser.py` dependency-free (no Playwright/Selenium): it relies on the
+user's own browser so captcha is not tripped by automation fingerprints.
 
 ## Public API
 
@@ -117,6 +129,7 @@ Main methods:
 
 - `login(username, password)`
 - `verify_otp(otp, login_challenge=None)`
+- `login_with_browser(browser_path=None, timeout=600)`
 - `begin_browser_login()`
 - `exchange_callback_url(callback_url)`
 - `refresh_access_token(refresh_token=None)`
@@ -217,4 +230,3 @@ Reasonable next improvements:
 - persist refresh tokens if SP/Auth0 reliably returns them
 - expose water daily history if SP exposes it through a separate endpoint
 - add typed raw-response capture hooks for debugging upstream changes
-- add optional token caching for local CLI reuse

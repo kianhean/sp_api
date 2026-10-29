@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `SpServicesClient.login_with_browser()`: opens the user's own Chrome, Edge,
+  Chromium or Brave and captures the Auth0 callback automatically, so no URL
+  has to be pasted. Uses only the standard library (Chrome DevTools Protocol).
+- `BrowserNotFoundError` when no supported browser is installed
+- The E2E CLI saves tokens to `.sp_services_tokens.json` (owner-only) and reuses
+  the refresh token on later runs; `--token-cache` / `--no-token-cache`
+
+### Changed
+
+- The E2E CLI no longer prompts for a username and password; it uses them only
+  when they are set in `.env`, and otherwise goes straight to the browser login
+
+### Fixed
+
+- A callback `state` containing non-ASCII characters raised `TypeError` instead
+  of being rejected
+- A non-JSON response body raised `requests.JSONDecodeError` instead of
+  `ApiError`
+- The `Set-Cookie` CSRF fallback matched any cookie ending in `_csrf`
+- An unrecognized CSV section heading not preceded by a blank line had its rows
+  appended to the previous section
+- Today's electricity from the half-hourly CSV and the daily history only
+  matched ISO dates; day-first periods such as `29/10/2026` are now matched
+
 ## 2.0.0 - 2026-07-29
 
 ### Breaking

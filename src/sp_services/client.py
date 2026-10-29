@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from .browser import capture_callback_url
 from .exceptions import ApiError, AuthenticationError, SessionExpiredError
 from .models import LoginChallenge, TokenSet, UsageData, UsagePoint
 
@@ -41,6 +42,7 @@ _SKALBOX_MONTHLY_CSV_URL = f"{_SKALBOX_BASE_URL}/private/charts/csv/monthly"
 
 _AUTH0_CLIENT_ID = "0I6XpXThehIU3SgaSbzraCgekkHg2rJH"
 _AUTH0_REDIRECT_URI = f"{_BASE_URL}/callback?fromLogin=true"
+_AUTH0_CALLBACK_PREFIX = f"{_BASE_URL}/callback"
 _AUTH0_SCOPE = "openid profile email offline_access"
 _AUTH0_AUDIENCE = "https://profile.up.spdigital.sg/"
 _AUTH0_CONNECTION = "Username-Password-Authentication"
@@ -85,7 +87,7 @@ _CSRF_RE = re.compile(r'name=["\']_csrf["\'][^>]*value=["\']([^"\']+)["\']')
 _INLINE_CSRF_RE = re.compile(r'"_csrf"\s*:\s*"([^"]+)"')
 _CSRF_TOKEN_RE = re.compile(r'"csrf(?:_token|Token)?"\s*:\s*"([^"]+)"')
 _CONFIG_BLOB_RE = re.compile(r"@@config@@([^\"'<\s]+)")
-_SET_COOKIE_CSRF_RE = re.compile(r"(?:^|;\s*|,?\s*)_csrf=([^;,\s]+)")
+_SET_COOKIE_CSRF_RE = re.compile(r"(?:^|[;,]\s*)_csrf=([^;,\s]+)")
 _URL_RE = re.compile(r"https?://[^\s\"'<>\\]+")
 
 
@@ -191,6 +193,26 @@ class SpServicesClient:
             nonce=context.nonce,
             code_verifier=context.code_verifier,
         )
+
+    async def login_with_browser(
+        self, *, browser_path: str | None = None, timeout: float = 600.0
+    ) -> str:
+        """Log in through the user's own browser and return an access token.
+
+        Opens an installed Chrome, Edge, Chromium or Brave window with a
+        throwaway profile. The user completes captcha, login and OTP there; the
+        callback is captured automatically, so nothing has to be pasted. Raises
+        :class:`BrowserNotFoundError` when no supported browser is installed.
+        """
+        authorize_url = await self.begin_browser_login()
+        callback_url = await asyncio.to_thread(
+            capture_callback_url,
+            authorize_url,
+            _AUTH0_CALLBACK_PREFIX,
+            browser_path=browser_path,
+            timeout=timeout,
+        )
+        return await self.exchange_callback_url(callback_url)
 
     async def exchange_callback_url(self, callback_url: str) -> str:
         """Exchange an Auth0 callback URL for an access token."""
@@ -515,10 +537,13 @@ class SpServicesClient:
             raise SessionExpiredError("SP Services token expired")
         if not resp.ok:
             raise ApiError(f"SP Services request returned HTTP {resp.status_code}")
-        body = resp.json()
+        try:
+            body = resp.json()
+        except ValueError as err:
+            raise ApiError("SP Services returned a non-JSON response") from err
         if isinstance(body, dict):
             return body
-        raise ApiError("SP Services returned a non-JSON response")
+        raise ApiError("SP Services returned a JSON response that is not an object")
 
     async def _skalbox_call(
         self,
@@ -708,7 +733,10 @@ def _code_from_url(url: str, expected_state: str) -> str | None:
     query = parse_qs(urlparse(url).query)
     code = query.get("code", [None])[0]
     state = query.get("state", [None])[0]
-    if code and state and secrets.compare_digest(state, expected_state):
+    if not code or not state:
+        return None
+    # compare_digest rejects non-ASCII str, so compare the encoded bytes.
+    if secrets.compare_digest(state.encode("utf-8"), expected_state.encode("utf-8")):
         return code
     return None
 
@@ -913,10 +941,10 @@ def _parse_daily_history_csv(
 
 
 def _parse_daily_csv(csv_text: str, now: datetime) -> float | None:
-    target_day = now.date().isoformat()
+    target_day = now.date()
     electricity_values: list[float] = []
     for row in _csv_rows(csv_text):
-        if not _row_period(row).startswith(target_day):
+        if not _period_matches_day(_row_period(row), target_day):
             continue
         value = _coerce_float(row.get("Current"))
         if value is not None:
@@ -935,11 +963,16 @@ def _parse_titled_csv_sections(csv_text: str) -> dict[str, list[dict[str, str]]]
     sections: dict[str, list[dict[str, str]]] = {}
     current_section: str | None = None
     current_headers: list[str] | None = None
+    # Set by an unrecognized single-column line inside a section: it is either
+    # filler ("No data available") or the heading of a section we cannot
+    # classify. A header row right after it means the latter.
+    maybe_unknown_heading = False
 
     for raw_line in csv_text.splitlines():
         line = raw_line.strip()
         if not line:
             current_headers = None
+            maybe_unknown_heading = False
             continue
 
         parsed = next(csv.reader([line]))
@@ -949,19 +982,33 @@ def _parse_titled_csv_sections(csv_text: str) -> dict[str, list[dict[str, str]]]
                 current_section = title
                 sections.setdefault(current_section, [])
                 current_headers = None
+                maybe_unknown_heading = False
             elif current_headers is None:
                 # An unrecognized heading starts a section we cannot classify.
                 # Leave the previous section rather than silently appending the
                 # new section's rows to it.
                 current_section = None
+            else:
+                maybe_unknown_heading = True
             continue
 
         if current_section is None:
             continue
 
+        row_headers = [header.strip() for header in parsed]
         if current_headers is None:
-            current_headers = [header.strip() for header in parsed]
+            current_headers = row_headers
             continue
+
+        if row_headers == current_headers:
+            # A repeated header row is never data. After an unknown heading it
+            # opens that unknown section, whose rows must not be kept.
+            if maybe_unknown_heading:
+                current_section = None
+                current_headers = None
+            maybe_unknown_heading = False
+            continue
+        maybe_unknown_heading = False
 
         if len(parsed) != len(current_headers):
             continue
@@ -1030,9 +1077,9 @@ def _section_history_points(rows: list[dict[str, str]]) -> list[UsagePoint]:
 
 
 def _latest_value_for_day(points: list[UsagePoint], now: datetime) -> float | None:
-    target_day = now.date().isoformat()
+    target_day = now.date()
     for point in reversed(points):
-        if point.period == target_day:
+        if _period_matches_day(point.period, target_day):
             return point.value
     return None
 
