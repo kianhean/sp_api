@@ -246,10 +246,19 @@ automatically.
   `interaction_required` raise `SessionExpiredError`; any other unexpected
   answer raises `ApiError`.
 
+- Accounts whose electricity moved to an Open Electricity Market retailer are
+  MSSL accounts (`system: MSSL`, `type: NON`, `services: ["electricity"]`).
+  SP publishes no usage for them: the CSV exports return headers only, the
+  monthly CSV returns HTTP 500, the JSON charts return status 150, and SP's
+  own portal says data is unavailable (checked 2026-10-29). Treat this as
+  missing upstream data, not a parsing bug.
+
 ## Future Work
 
 Reasonable next improvements:
 
 - measure the Auth0 session's absolute lifetime, if it has one
+- pick the account per service from `getAccounts` `services` if SP starts
+  publishing usage for MSSL (retailer) electricity accounts
 - expose water daily history if SP exposes it through a separate endpoint
 - add typed raw-response capture hooks for debugging upstream changes
