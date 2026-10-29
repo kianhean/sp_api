@@ -15,3 +15,7 @@ class SessionExpiredError(AuthenticationError):
 
 class ApiError(SpServicesError):
     """Raised when the upstream SP Services API returns an unexpected response."""
+
+
+class BrowserNotFoundError(SpServicesError):
+    """Raised when no supported browser is available for automatic login."""

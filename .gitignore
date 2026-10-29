@@ -11,3 +11,4 @@ dist/
 .coverage
 coverage.xml
 htmlcov/
+.sp_services_tokens.json
