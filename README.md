@@ -17,7 +17,8 @@ upstream stability guarantees.
 - OTP verification flow
 - automatic browser login: complete captcha and OTP in your own Chrome/Edge
   window, with no callback URL to copy
-- saved refresh token so later CLI runs skip the login entirely
+- silent renewal from the saved Auth0 session, so later runs and long-running
+  clients get new access tokens without captcha or OTP
 - current electricity and water summary fields
 - monthly historical electricity and water data where available
 - hourly electricity history from the CSV export endpoint
@@ -83,15 +84,24 @@ uv run sp-services-e2e --save-json usage.json
 
 The CLI will:
 
-- reuse the refresh token saved by a previous run in `.sp_services_tokens.json`
-  (gitignored, owner-only permissions), skipping the login entirely
+- reuse the access token saved by a previous run in `.sp_services_tokens.json`
+  (gitignored, owner-only permissions) while it is still valid
+- once it has expired, renew silently from the Auth0 session saved in the same
+  file, with no browser, captcha or OTP
 - otherwise try the direct login flow if credentials are in `.env`
 - fall back to the automatic browser login when captcha is required
-- exchange the resulting authorization code and save the new tokens
+- exchange the resulting authorization code and save the new tokens and session
 - fetch and print usage data as JSON
 
 Use `--token-cache PATH` to keep the tokens elsewhere, or `--no-token-cache` to
 neither read nor write them.
+
+Two more modes skip the usage fetch:
+
+- `--renew` forces one silent renewal and prints the new access-token expiry
+  (never the token).
+- `--export-session` logs in if needed and prints the session string for
+  `SessionState.from_string()`. It is a credential: treat it like a password.
 
 ### Browser-Assisted Login
 
@@ -213,6 +223,35 @@ asyncio.run(main())
 `login_with_browser()` raises `BrowserNotFoundError` when no supported browser
 is installed; use the manual flow below in that case.
 
+### Silent Renewal From A Saved Session
+
+SP's Auth0 tenant returns no refresh token, so the Auth0 session cookie is what
+keeps a client logged in. Export it after a login, store it, and renew from it
+later with no browser, captcha or OTP:
+
+```python
+from sp_services import SessionState, SessionExpiredError, SpServicesClient
+
+async with SpServicesClient() as client:
+    await client.login_with_browser()
+    saved = client.export_session().to_string()   # store this like a password
+
+# later, in another process
+async with SpServicesClient(session_state=SessionState.from_string(saved)) as client:
+    try:
+        tokens = await client.renew_silently()
+    except SessionExpiredError:
+        ...  # the Auth0 session ended; a person has to log in again
+    saved = client.export_session().to_string()   # persist again: the session slides
+    usage = await client.fetch_usage(tokens.access_token)
+```
+
+`renew_silently()` calls `/authorize` with `prompt=none` and follows the
+redirects itself until the SP callback, checks the `state`, and exchanges the
+code. It raises `SessionExpiredError` when Auth0 answers `login_required`,
+`consent_required` or `interaction_required`, or when no session cookies are
+loaded, and `ApiError` for any other unexpected answer.
+
 ### Manual Browser Flow
 
 ```python
@@ -267,14 +306,21 @@ asyncio.run(main())
 - `SpServicesClient.begin_browser_login()`
 - `SpServicesClient.exchange_callback_url(callback_url)`
 - `SpServicesClient.refresh_access_token(refresh_token=None)`
+- `SpServicesClient.renew_silently()`
+- `SpServicesClient.export_session()`
 - `SpServicesClient.fetch_usage(token, account_no=None)`
 - `SpServicesClient.token_set`
+
+`SpServicesClient(debug=False, session_state=None)` loads a saved
+`SessionState` so `renew_silently()` can use it.
 
 `fetch_usage` uses the first linked account unless `account_no` is given.
 
 ### Models
 
 - `LoginChallenge`
+- `SessionCookie`
+- `SessionState` (`to_string()` / `from_string()`)
 - `TokenSet`
 - `UsageData`
 - `UsagePoint`
@@ -291,10 +337,19 @@ if tokens.refresh_token and tokens.is_expired():
     tokens = await client.refresh_access_token(tokens.refresh_token)
 ```
 
-The library requests the `offline_access` scope, so Auth0 usually returns a
-refresh token. Persist it if you need unattended re-authentication; without one
-the only way back is another interactive browser login. `refresh_access_token`
-keeps the existing refresh token when Auth0 does not rotate it.
+The library requests the `offline_access` scope, but SP's Auth0 tenant does not
+return a refresh token (checked 2026-10-29), so `refresh_access_token` only
+helps if SP enables refresh tokens later. Use the saved session and
+`renew_silently()` instead; see "Silent Renewal From A Saved Session" above.
+
+Measured lifetimes (2026-10-29, against a real account):
+
+- access token: 1 hour (`expires_in` 3600)
+- Auth0 session (`auth0` / `auth0_compat` cookies): expires 3 days after it
+  was last used. Every login and every silent renewal sets the cookies'
+  expiry 3 days ahead again, so a client that renews at least once every
+  3 days keeps the session alive. Auth0 may also have an absolute maximum
+  lifetime; that has not been measured yet.
 
 ### Timezone
 
@@ -422,44 +477,37 @@ Notes on real SP data:
 The library is usable from a custom integration. Read this section before
 building one — the login flow, not the data parsing, is what makes or breaks it.
 
-### Check This First: Does SP Return A Refresh Token?
+### Staying Logged In
 
-This is the one thing worth confirming before writing any integration code.
-
-The login flow is browser + captcha + OTP. That is fine once, during config
-flow, but Home Assistant polls for months and Auth0 access tokens typically last
-hours. Without a refresh token every expiry drops the integration into a broken
-state that only a human pasting a callback URL can fix.
-
-The library requests the `offline_access` scope, so Auth0 should return a
-refresh token — but this is a private SP deployment and that is not guaranteed.
-Verify against your own account:
-
-```bash
-uv run sp-services-e2e
-```
-
-The CLI prints whether a refresh token was returned and when the access token
-expires. If it reports one, the unattended path below works. If it does not, no
-amount of integration code fixes it: plan for a reauth flow that walks the user
-through the browser login again whenever the token dies.
-
-### Token Handling
-
-Persist the refresh token in the config entry and refresh before expiry:
+The login is browser + captcha + OTP, which is fine once during the config flow.
+SP returns no refresh token, so store the **session string** instead:
 
 ```python
-tokens = client.token_set          # after exchange_callback_url / verify_otp
-entry.data["refresh_token"]        # persist tokens.refresh_token here
+# config flow, after the login
+entry_data["session"] = client.export_session().to_string()
 
-# later, before each update
-if tokens.is_expired():
-    tokens = await client.refresh_access_token(stored_refresh_token)
+# setup / each update, when the access token is missing or expired
+client = SpServicesClient(session_state=SessionState.from_string(entry.data["session"]))
+tokens = await client.renew_silently()
+hass.config_entries.async_update_entry(
+    entry, data={**entry.data, "session": client.export_session().to_string()}
+)
 ```
 
-`refresh_access_token` keeps the existing refresh token when Auth0 does not
-rotate it, so a stored value stays valid across refreshes. `is_expired()`
-applies a 60-second leeway by default.
+- Access tokens last 1 hour, so renew when `client.token_set.is_expired()`
+  is true (60-second leeway by default).
+- The Auth0 session expires 3 days after its last use. Each renewal pushes
+  that back, so an integration polling every 15–30 minutes never gets near
+  the limit. Write the session string back after each renewal anyway, so the
+  stored cookie expiry stays current.
+- `renew_silently()` raises `SessionExpiredError` when the session has ended.
+  Map it to `ConfigEntryAuthFailed`, so Home Assistant starts a reauth flow,
+  then backfill the missed history once the user is logged in again.
+- The session string is a credential, so keep it in the config entry, never in
+  logs or diagnostics.
+
+`uv run sp-services-e2e --export-session` prints the session string after a
+login, for pasting into an integration while you develop it.
 
 ### Coordinator And Error Mapping
 

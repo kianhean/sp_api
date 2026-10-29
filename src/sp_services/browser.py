@@ -112,6 +112,31 @@ def capture_callback_url(
     Blocks until the login finishes, the browser window is closed, or
     ``timeout`` seconds pass. Run it in a worker thread from async code.
     """
+    callback_url, _ = capture_login(
+        authorize_url,
+        callback_prefix,
+        browser_path=browser_path,
+        timeout=timeout,
+        headless=headless,
+    )
+    return callback_url
+
+
+def capture_login(
+    authorize_url: str,
+    callback_prefix: str,
+    *,
+    cookie_host: str | None = None,
+    browser_path: str | None = None,
+    timeout: float = 600.0,
+    headless: bool = False,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Like :func:`capture_callback_url`, also returning the login's cookies.
+
+    The cookies are the ones the browser holds for ``cookie_host`` once the
+    callback is reached, read over the same DevTools connection before the
+    browser closes, as raw CDP cookie objects. Empty when no host is given.
+    """
     executable = browser_path or find_browser()
     profile_dir = tempfile.mkdtemp(prefix="sp-services-login-")
     args = [
@@ -138,7 +163,13 @@ def capture_callback_url(
     try:
         port, ws_path = _wait_for_devtools(Path(profile_dir), process, deadline)
         connection = _CdpConnection("127.0.0.1", port, ws_path)
-        return _intercept_callback(connection, authorize_url, callback_prefix, deadline)
+        callback_url = _intercept_callback(
+            connection, authorize_url, callback_prefix, deadline
+        )
+        cookies = (
+            _read_cookies(connection, cookie_host, deadline) if cookie_host else []
+        )
+        return callback_url, cookies
     finally:
         if connection is not None:
             try:
@@ -242,6 +273,26 @@ def _intercept_callback(
             session_id,
         )
         return url
+
+
+def _read_cookies(
+    connection: _CdpConnection, host: str, deadline: float
+) -> list[dict[str, Any]]:
+    """Return the browser's cookies set for ``host`` or a parent domain of it."""
+    # Auth0 has already answered the request that led to the callback, so its
+    # Set-Cookie headers are stored by now.
+    result = connection.call("Storage.getCookies", deadline=deadline)
+    return [
+        cookie
+        for cookie in result.get("cookies", [])
+        if _cookie_matches_host(str(cookie.get("domain", "")), host)
+    ]
+
+
+def _cookie_matches_host(cookie_domain: str, host: str) -> bool:
+    domain = cookie_domain.lstrip(".").lower()
+    host = host.lower()
+    return host == domain or host.endswith(f".{domain}")
 
 
 class _CdpConnection:

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import base64
+import binascii
+import json
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -42,9 +46,10 @@ class TokenSet:
     """OAuth tokens returned by the Auth0 token endpoint.
 
     ``refresh_token`` is only present when SP/Auth0 honours the
-    ``offline_access`` scope. Callers that need unattended re-authentication
-    (for example a long-running Home Assistant integration) should persist it
-    and pass it to :meth:`SpServicesClient.refresh_access_token`.
+    ``offline_access`` scope, which SP's tenant currently does not. For
+    unattended re-authentication (for example a long-running Home Assistant
+    integration) persist a :class:`SessionState` and call
+    :meth:`SpServicesClient.renew_silently` instead.
     """
 
     access_token: str
@@ -60,6 +65,57 @@ class TokenSet:
         return datetime.now(timezone.utc) >= self.expires_at - timedelta(
             seconds=leeway_seconds
         )
+
+
+@dataclass(slots=True)
+class SessionCookie:
+    """One Auth0 session cookie. ``expires`` is a Unix timestamp, or ``None``
+    for a browser-session cookie."""
+
+    name: str
+    value: str
+    domain: str
+    path: str = "/"
+    expires: float | None = None
+    secure: bool = True
+    http_only: bool = True
+
+
+@dataclass(slots=True)
+class SessionState:
+    """The Auth0 login session, as cookies for ``identity.spdigital.auth0.com``.
+
+    SP's Auth0 tenant issues no refresh token, so this is what lets a
+    long-running client get new access tokens without captcha or OTP: pass it
+    back to :class:`SpServicesClient` and call
+    :meth:`SpServicesClient.renew_silently`. Anyone holding it can act as the
+    logged-in user, so store it like a password.
+    """
+
+    cookies: list[SessionCookie] = field(default_factory=list)
+
+    def to_string(self) -> str:
+        """Serialize to compact base64url JSON for storage in a config entry."""
+        payload = json.dumps(
+            [asdict(cookie) for cookie in self.cookies], separators=(",", ":")
+        )
+        return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+
+    @classmethod
+    def from_string(cls, value: str) -> SessionState:
+        """Parse a string made by :meth:`to_string`; raises ``ValueError``."""
+        try:
+            raw = base64.urlsafe_b64decode(value.strip().encode("ascii"))
+            items: Any = json.loads(raw.decode("utf-8"))
+        except (binascii.Error, UnicodeError, json.JSONDecodeError) as err:
+            raise ValueError("not a valid SP Services session string") from err
+        if not isinstance(items, list):
+            raise ValueError("not a valid SP Services session string")
+        try:
+            cookies = [SessionCookie(**item) for item in items]
+        except TypeError as err:
+            raise ValueError("not a valid SP Services session string") from err
+        return cls(cookies=cookies)
 
 
 @dataclass(slots=True)

@@ -8,14 +8,23 @@ from .exceptions import (
     SessionExpiredError,
     SpServicesError,
 )
-from .models import LoginChallenge, TokenSet, UsageData, UsagePoint
+from .models import (
+    LoginChallenge,
+    SessionCookie,
+    SessionState,
+    TokenSet,
+    UsageData,
+    UsagePoint,
+)
 
 __all__ = [
     "ApiError",
     "AuthenticationError",
     "BrowserNotFoundError",
     "LoginChallenge",
+    "SessionCookie",
     "SessionExpiredError",
+    "SessionState",
     "SpServicesClient",
     "SpServicesError",
     "TokenSet",

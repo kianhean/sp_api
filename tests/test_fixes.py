@@ -137,14 +137,35 @@ class TestLoginWithBrowser(unittest.IsolatedAsyncioTestCase):
         client._post_json = AsyncMock(  # type: ignore[method-assign]
             return_value={"access_token": "token-123", "refresh_token": "r-1"}
         )
-        capture = Mock(return_value=f"{_CALLBACK}?code=abc&state=expected-state")
+        capture = Mock(
+            return_value=(
+                f"{_CALLBACK}?code=abc&state=expected-state",
+                [
+                    {
+                        "name": "auth0",
+                        "value": "session-value",
+                        "domain": "identity.spdigital.auth0.com",
+                        "path": "/",
+                        "expires": -1,
+                        "secure": True,
+                        "httpOnly": True,
+                    }
+                ],
+            )
+        )
 
-        with patch("sp_services.client.capture_callback_url", capture):
+        with patch("sp_services.client.capture_login", capture):
             token = await client.login_with_browser(timeout=5)
 
         self.assertEqual(token, "token-123")
         self.assertIn("state=expected-state", capture.call_args.args[0])
         self.assertEqual(capture.call_args.args[1], _CALLBACK)
+        self.assertEqual(
+            capture.call_args.kwargs["cookie_host"], "identity.spdigital.auth0.com"
+        )
+        self.assertEqual(
+            [c.name for c in client.export_session().cookies], ["auth0"]
+        )
         sent = client._post_json.await_args.args[1]
         self.assertEqual(sent["code"], "abc")
         self.assertEqual(sent["code_verifier"], "verifier")
