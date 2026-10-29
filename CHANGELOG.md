@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 - 2026-10-29
+
+### Added
+
+- `SpServicesClient.renew_silently()`: gets a new access token from the Auth0
+  session with `/authorize?prompt=none`, with no browser, captcha or OTP.
+  Raises `SessionExpiredError` once the session has ended.
+- `SpServicesClient.export_session()` and the `SessionState` / `SessionCookie`
+  models, with `to_string()` / `from_string()` for storing the session, for
+  example in a Home Assistant config entry
+- `SpServicesClient(session_state=...)` loads a saved session
+- `login_with_browser()` keeps the browser's Auth0 session cookies, read over
+  the same DevTools connection (`browser.capture_login()`)
+- The E2E CLI saves the session next to the tokens and renews silently once
+  the access token expires; `--renew` and `--export-session`
+
+### Changed
+
+- Version numbering follows the git tags again: `pyproject.toml` said `2.0.0`
+  while the last tag was `v1.2.0`
+
+## 1.2.0 - 2026-10-29
 
 ### Added
 

@@ -9,6 +9,7 @@ The library currently supports:
 
 - browser-assisted Auth0 login with OTP
 - access token exchange via callback URL
+- silent token renewal from a saved Auth0 session (`prompt=none`)
 - household usage fetches from SP private APIs
 - current usage summary fields
 - monthly historical electricity and water series when available
@@ -38,8 +39,10 @@ The library currently supports:
   Package exception hierarchy.
 - `src/sp_services/cli.py`
   Manual E2E CLI for real-account verification.
-- `tests/test_client.py`
+- `tests/test_client.py`, `tests/test_fixes.py`
   Parser and helper tests.
+- `tests/test_silent_renewal.py`
+  Silent renewal, `SessionState` and session cache tests.
 - `.github/workflows/ci.yml`
   CI for lint and tests.
 
@@ -113,8 +116,21 @@ The library then exchanges the authorization code for an access token and
 continues with API calls. If no browser is found, the CLI falls back to
 printing the authorize URL and asking for the callback URL to be pasted.
 
-The CLI caches tokens in `.sp_services_tokens.json` and reuses the refresh
-token, so later runs skip the login. Never print or log refresh tokens.
+SP's Auth0 tenant returns no refresh token. Long-running clients stay logged in
+through the Auth0 session cookies on `identity.spdigital.auth0.com` instead:
+`login_with_browser()` reads them over the same DevTools connection,
+`export_session()` returns them as a `SessionState`, and `renew_silently()`
+uses them for `/authorize?prompt=none`, which redirects straight to the SP
+callback with a code and no captcha or OTP.
+
+Measured 2026-10-29: access tokens last 1 hour. The `auth0` / `auth0_compat`
+session cookies expire 3 days after their last use, and each login or renewal
+pushes that back 3 days; the cookie values stay the same. Any absolute session
+limit has not been measured.
+
+The CLI caches tokens and the session string in `.sp_services_tokens.json`
+(owner-only, gitignored), and renews silently once the access token expires.
+Never print or log refresh tokens, session strings or cookie values.
 
 Keep `browser.py` dependency-free (no Playwright/Selenium): it relies on the
 user's own browser so captcha is not tripped by automation fingerprints.
@@ -123,7 +139,7 @@ user's own browser so captcha is not tripped by automation fingerprints.
 
 Primary entrypoint:
 
-- `sp_services.SpServicesClient`
+- `sp_services.SpServicesClient(*, debug=False, session_state=None)`
 
 Main methods:
 
@@ -133,6 +149,8 @@ Main methods:
 - `begin_browser_login()`
 - `exchange_callback_url(callback_url)`
 - `refresh_access_token(refresh_token=None)`
+- `renew_silently()`
+- `export_session()`
 - `fetch_usage(token, account_no=None)`
 - `close()`
 
@@ -146,6 +164,7 @@ Primary models:
 - `UsagePoint`
 - `LoginChallenge`
 - `TokenSet`
+- `SessionState` / `SessionCookie`
 
 ## UsageData Shape
 
@@ -222,11 +241,15 @@ automatically.
   code; never accept a code from a callback that omits it.
 - `UsagePoint.value` is optional; periods SP publishes with a status but no
   figure are preserved with `value=None`.
+- `renew_silently()` must follow redirects by hand and stop at the callback
+  prefix without requesting it. `login_required`, `consent_required` and
+  `interaction_required` raise `SessionExpiredError`; any other unexpected
+  answer raises `ApiError`.
 
 ## Future Work
 
 Reasonable next improvements:
 
-- persist refresh tokens if SP/Auth0 reliably returns them
+- measure the Auth0 session's absolute lifetime, if it has one
 - expose water daily history if SP exposes it through a separate endpoint
 - add typed raw-response capture hooks for debugging upstream changes

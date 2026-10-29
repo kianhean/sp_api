@@ -14,17 +14,25 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import requests
 
-from .browser import capture_callback_url
+from .browser import capture_login
 from .exceptions import ApiError, AuthenticationError, SessionExpiredError
-from .models import LoginChallenge, TokenSet, UsageData, UsagePoint
+from .models import (
+    LoginChallenge,
+    SessionCookie,
+    SessionState,
+    TokenSet,
+    UsageData,
+    UsagePoint,
+)
 
 _BASE_URL = "https://services.spservices.sg"
-_AUTH0_BASE_URL = "https://identity.spdigital.auth0.com"
+_AUTH0_HOST = "identity.spdigital.auth0.com"
+_AUTH0_BASE_URL = f"https://{_AUTH0_HOST}"
 _SKALBOX_BASE_URL = "https://c-api-gateway.tkg.spdigital.io/skalbox"
 
 _AUTH0_AUTHORIZE_URL = f"{_AUTH0_BASE_URL}/authorize"
@@ -61,6 +69,20 @@ _HEADERS: dict[str, str] = {
 }
 
 _AUTH_HEADERS = {**_HEADERS, "Content-Type": "application/json"}
+
+# A silent renewal is a top-level navigation in the browser, so it carries no
+# Origin and asks for HTML.
+_NAVIGATION_HEADERS = {
+    **{key: value for key, value in _HEADERS.items() if key != "Origin"},
+    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+}
+
+# prompt=none errors that mean the Auth0 session is gone and a person has to
+# log in again.
+_SESSION_ENDED_ERRORS = frozenset(
+    {"login_required", "consent_required", "interaction_required"}
+)
+_MAX_SILENT_REDIRECTS = 10
 
 _SP_TIMEZONE = ZoneInfo("Asia/Singapore")
 
@@ -107,11 +129,16 @@ class _AuthContext:
 class SpServicesClient:
     """Low-level async HTTP client for the SP Services portal."""
 
-    def __init__(self, *, debug: bool = False) -> None:
+    def __init__(
+        self, *, debug: bool = False, session_state: SessionState | None = None
+    ) -> None:
         self._session: requests.Session = requests.Session()
         self._auth_context: _AuthContext | None = None
         self._token_set: TokenSet | None = None
         self._debug = debug
+        if session_state is not None:
+            for cookie in session_state.cookies:
+                self._set_auth0_cookie(cookie)
 
     @property
     def token_set(self) -> TokenSet | None:
@@ -203,16 +230,133 @@ class SpServicesClient:
         throwaway profile. The user completes captcha, login and OTP there; the
         callback is captured automatically, so nothing has to be pasted. Raises
         :class:`BrowserNotFoundError` when no supported browser is installed.
+
+        The browser's Auth0 session cookies are kept, so :meth:`export_session`
+        and :meth:`renew_silently` work afterwards.
         """
         authorize_url = await self.begin_browser_login()
-        callback_url = await asyncio.to_thread(
-            capture_callback_url,
+        callback_url, cookies = await asyncio.to_thread(
+            capture_login,
             authorize_url,
             _AUTH0_CALLBACK_PREFIX,
+            cookie_host=_AUTH0_HOST,
             browser_path=browser_path,
             timeout=timeout,
         )
+        for cookie in cookies:
+            self._set_auth0_cookie(_session_cookie_from_cdp(cookie))
         return await self.exchange_callback_url(callback_url)
+
+    def export_session(self) -> SessionState:
+        """Return the current Auth0 session cookies.
+
+        Includes cookies rolled forward by :meth:`renew_silently`, so persist
+        the result again after every renewal.
+        """
+        return SessionState(
+            cookies=[
+                SessionCookie(
+                    name=cookie.name,
+                    value=cookie.value or "",
+                    domain=cookie.domain,
+                    path=cookie.path,
+                    expires=float(cookie.expires) if cookie.expires else None,
+                    secure=bool(cookie.secure),
+                    http_only=cookie.has_nonstandard_attr("HttpOnly"),
+                )
+                for cookie in self._auth0_cookies()
+            ]
+        )
+
+    async def renew_silently(self) -> TokenSet:
+        """Get a new access token from the Auth0 session, without captcha or OTP.
+
+        Needs the session cookies from a previous login, loaded through the
+        ``session_state`` constructor argument or kept by
+        :meth:`login_with_browser`. Raises :class:`SessionExpiredError` when
+        the Auth0 session has ended and a person has to log in again.
+        """
+        if not self._auth0_cookies():
+            raise SessionExpiredError(
+                "no Auth0 session cookies are loaded; log in again"
+            )
+
+        oauth_state = _random_token(32)
+        nonce = _random_token(32)
+        code_verifier = _random_token(48)
+        params = self._authorize_params(
+            oauth_state=oauth_state,
+            nonce=nonce,
+            code_verifier=code_verifier,
+        )
+        params.update(prompt="none", response_mode="query")
+        callback_url = await self._follow_to_callback(
+            f"{_AUTH0_AUTHORIZE_URL}?{urlencode(params)}"
+        )
+
+        error = _oauth_error(callback_url)
+        if error in _SESSION_ENDED_ERRORS:
+            raise SessionExpiredError(
+                f"Auth0 session has ended ({error}); log in again"
+            )
+        if error:
+            raise ApiError(f"SP Services silent renewal returned error={error}")
+
+        code = _code_from_url(callback_url, oauth_state)
+        if not code:
+            raise ApiError(
+                "SP Services silent renewal returned no code matching the "
+                "expected state"
+            )
+        return await self._exchange_code(code, code_verifier)
+
+    async def _follow_to_callback(self, url: str) -> str:
+        """Follow redirects by hand and return the callback URL they reach.
+
+        The callback itself is never requested: it belongs to SP's web app and
+        the code must stay with this client.
+        """
+        for _ in range(_MAX_SILENT_REDIRECTS):
+            resp = await self._request(
+                "GET",
+                url,
+                headers=_NAVIGATION_HEADERS,
+                timeout=30,
+                allow_redirects=False,
+            )
+            location = (getattr(resp, "headers", None) or {}).get("Location")
+            if not (300 <= resp.status_code < 400 and location):
+                raise ApiError(
+                    "SP Services silent renewal stopped at HTTP "
+                    f"{resp.status_code} without reaching the callback"
+                )
+            url = urljoin(url, location)
+            if url.startswith(_AUTH0_CALLBACK_PREFIX):
+                return url
+        raise ApiError("SP Services silent renewal redirected too many times")
+
+    def _auth0_cookies(self) -> list[Any]:
+        return [
+            cookie
+            for cookie in self._session.cookies
+            if cookie.domain.lstrip(".").lower() == _AUTH0_HOST
+            and not cookie.is_expired()
+        ]
+
+    def _set_auth0_cookie(self, cookie: SessionCookie) -> None:
+        if cookie.domain.lstrip(".").lower() != _AUTH0_HOST:
+            return
+        self._session.cookies.set_cookie(
+            requests.cookies.create_cookie(
+                name=cookie.name,
+                value=cookie.value,
+                domain=cookie.domain,
+                path=cookie.path,
+                secure=cookie.secure,
+                expires=int(cookie.expires) if cookie.expires else None,
+                rest={"HttpOnly": None} if cookie.http_only else {},
+            )
+        )
 
     async def exchange_callback_url(self, callback_url: str) -> str:
         """Exchange an Auth0 callback URL for an access token."""
@@ -720,6 +864,25 @@ def _extract_login_state(url: str) -> str | None:
     if not url:
         return None
     return parse_qs(urlparse(url).query).get("state", [None])[0]
+
+
+def _oauth_error(url: str) -> str | None:
+    return parse_qs(urlparse(url).query).get("error", [None])[0]
+
+
+def _session_cookie_from_cdp(cookie: dict[str, Any]) -> SessionCookie:
+    """Convert a DevTools Protocol cookie object; CDP marks session cookies
+    with ``expires`` of -1."""
+    expires = _coerce_float(cookie.get("expires"))
+    return SessionCookie(
+        name=str(cookie.get("name", "")),
+        value=str(cookie.get("value", "")),
+        domain=str(cookie.get("domain", "")),
+        path=str(cookie.get("path") or "/"),
+        expires=expires if expires is not None and expires > 0 else None,
+        secure=bool(cookie.get("secure", False)),
+        http_only=bool(cookie.get("httpOnly", False)),
+    )
 
 
 def _code_from_url(url: str, expected_state: str) -> str | None:

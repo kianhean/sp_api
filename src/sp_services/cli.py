@@ -6,11 +6,13 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 import traceback
 import webbrowser
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from .client import SpServicesClient
 from .exceptions import (
@@ -19,7 +21,7 @@ from .exceptions import (
     SessionExpiredError,
     SpServicesError,
 )
-from .models import TokenSet
+from .models import SessionState, TokenSet
 
 _DEFAULT_TOKEN_CACHE = ".sp_services_tokens.json"
 
@@ -50,8 +52,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--token-cache",
         default=_DEFAULT_TOKEN_CACHE,
         help=(
-            "File that stores tokens between runs so the login can be skipped "
-            f"(default: {_DEFAULT_TOKEN_CACHE})."
+            "File that stores tokens and the Auth0 session between runs so the "
+            f"login can be skipped (default: {_DEFAULT_TOKEN_CACHE})."
         ),
     )
     parser.add_argument(
@@ -59,12 +61,37 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Neither read nor write the token cache.",
     )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--export-session",
+        action="store_true",
+        help=(
+            "Log in if needed, then print the session string for "
+            "SessionState.from_string(). It is a credential."
+        ),
+    )
+    mode.add_argument(
+        "--renew",
+        action="store_true",
+        help=(
+            "Force one silent renewal from the saved session and print the new "
+            "access-token expiry."
+        ),
+    )
     return parser
 
 
-def _load_tokens(path: Path) -> TokenSet | None:
+def _read_cache(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_tokens(path: Path) -> TokenSet | None:
+    data = _read_cache(path)
+    try:
         expires_at = data.get("expires_at")
         return TokenSet(
             access_token=str(data["access_token"]),
@@ -73,17 +100,35 @@ def _load_tokens(path: Path) -> TokenSet | None:
             token_type=str(data.get("token_type") or "Bearer"),
             scope=data.get("scope"),
         )
-    except (OSError, ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError):
         return None
 
 
-def _save_tokens(path: Path, tokens: TokenSet) -> None:
-    data = asdict(tokens)
+def _load_session(path: Path) -> SessionState | None:
+    raw_session = _read_cache(path).get("session")
+    if not isinstance(raw_session, str) or not raw_session:
+        return None
+    try:
+        return SessionState.from_string(raw_session)
+    except ValueError:
+        return None
+
+
+def _save_tokens(
+    path: Path, tokens: TokenSet, session: SessionState | None = None
+) -> None:
+    data: dict[str, Any] = asdict(tokens)
     data["expires_at"] = tokens.expires_at.isoformat() if tokens.expires_at else None
-    # Owner-only: the file holds a long-lived refresh token.
+    if session is not None and session.cookies:
+        data["session"] = session.to_string()
+    # Owner-only: the file holds the Auth0 session, which can mint new tokens.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as handle:
         handle.write(f"{json.dumps(data, indent=2)}\n")
+
+
+def _has_session(client: SpServicesClient) -> bool:
+    return bool(client.export_session().cookies)
 
 
 async def _token_from_cache(client: SpServicesClient, path: Path) -> str | None:
@@ -102,6 +147,19 @@ async def _token_from_cache(client: SpServicesClient, path: Path) -> str | None:
         print("Reused saved access token.")
         return cached.access_token
     return None
+
+
+async def _renew(client: SpServicesClient) -> str | None:
+    try:
+        tokens = await client.renew_silently()
+    except SessionExpiredError as err:
+        print(f"Saved session has ended ({err}); logging in again.")
+        return None
+    except SpServicesError as err:
+        print(f"Silent renewal failed ({err}); logging in again.")
+        return None
+    print("Renewed the login silently from the saved session.")
+    return tokens.access_token
 
 
 async def _browser_login(client: SpServicesClient) -> str:
@@ -150,8 +208,26 @@ async def _interactive_login(client: SpServicesClient) -> str:
     return await client.verify_otp(otp, challenge)
 
 
+async def _login(client: SpServicesClient) -> str:
+    """Renew silently from the saved session if possible, else log in."""
+    token = await _renew(client) if _has_session(client) else None
+    return token or await _interactive_login(client)
+
+
+def _save(client: SpServicesClient, cache_path: Path | None) -> None:
+    token_set = client.token_set
+    if cache_path is None or token_set is None:
+        return
+    _save_tokens(cache_path, token_set, client.export_session())
+    print(f"Saved tokens and session to {cache_path}")
+
+
 async def _run(
-    save_json: str | None = None, token_cache: str | None = _DEFAULT_TOKEN_CACHE
+    save_json: str | None = None,
+    token_cache: str | None = _DEFAULT_TOKEN_CACHE,
+    *,
+    export_session: bool = False,
+    renew: bool = False,
 ) -> None:
     _load_env_file()
     debug = os.environ.get("SP_SERVICES_DEBUG", "").strip().lower() in {
@@ -161,13 +237,44 @@ async def _run(
         "on",
     }
     cache_path = Path(token_cache) if token_cache else None
+    session = _load_session(cache_path) if cache_path else None
 
     try:
-        async with SpServicesClient(debug=debug) as client:
+        async with SpServicesClient(debug=debug, session_state=session) as client:
+            if renew:
+                if not _has_session(client):
+                    print("No saved session to renew; run without --renew to log in.")
+                    raise SystemExit(1)
+                tokens = await client.renew_silently()
+                expiry = tokens.expires_at.isoformat() if tokens.expires_at else None
+                print(
+                    f"Renewed silently. Access token expires at {expiry or 'unknown'}"
+                )
+                _save(client, cache_path)
+                return
+
             token = await _token_from_cache(client, cache_path) if cache_path else None
             from_cache = token is not None
             if token is None:
-                token = await _interactive_login(client)
+                token = await _login(client)
+
+            if export_session:
+                _save(client, cache_path)
+                state = client.export_session()
+                if not state.cookies:
+                    print(
+                        "No Auth0 session is held (the saved access token was "
+                        "reused); run with --renew or delete the token cache."
+                    )
+                    raise SystemExit(1)
+                print(
+                    "WARNING: the session string below is a credential. Anyone "
+                    "holding it can read your SP account until the session ends. "
+                    "Store it like a password.",
+                    file=sys.stderr,
+                )
+                print(state.to_string())
+                return
 
             try:
                 usage = await client.fetch_usage(token)
@@ -175,23 +282,26 @@ async def _run(
                 if not from_cache:
                     raise
                 print("Saved login has expired; logging in again.")
-                token = await _interactive_login(client)
+                token = await _login(client)
                 usage = await client.fetch_usage(token)
 
             token_set = client.token_set
             if token_set is not None:
                 if token_set.refresh_token:
                     print("Refresh token obtained; later runs can skip the login.")
+                elif _has_session(client):
+                    print(
+                        "No refresh token returned; later runs renew silently "
+                        "from the saved Auth0 session."
+                    )
                 else:
                     print(
-                        "No refresh token returned; re-authentication will "
-                        "require another interactive login."
+                        "No refresh token or session returned; re-authentication "
+                        "will require another interactive login."
                     )
                 if token_set.expires_at:
                     print(f"Access token expires at {token_set.expires_at.isoformat()}")
-                if cache_path:
-                    _save_tokens(cache_path, token_set)
-                    print(f"Saved tokens to {cache_path}")
+            _save(client, cache_path)
 
             payload = json.dumps(asdict(usage), indent=2, default=str)
             print(payload)
@@ -209,4 +319,11 @@ async def _run(
 def main() -> None:
     args = _build_parser().parse_args()
     token_cache = None if args.no_token_cache else args.token_cache
-    asyncio.run(_run(save_json=args.save_json, token_cache=token_cache))
+    asyncio.run(
+        _run(
+            save_json=args.save_json,
+            token_cache=token_cache,
+            export_session=args.export_session,
+            renew=args.renew,
+        )
+    )
