@@ -471,6 +471,14 @@ Notes on real SP data:
 - daily exports are separate from half-hourly exports
 - hourly exports appear to be electricity-only in the current SP format
 - daily exports appear to be electricity-only in the current SP format
+- after a switch of electricity retailer (Open Electricity Market), electricity
+  moves to a new utilities account in SP's MSSL system, and the old account
+  keeps only water. The old account's electricity history stops at the
+  handover. For the new account, SP's export endpoints return nothing and SP's
+  own portal shows "Data is currently unavailable for this utilities account"
+  (checked 2026-10-29), so the electricity fields stay `null` — there is no
+  data for the library to fetch. `fetch_usage` still uses the first linked
+  account unless `account_no` is given.
 
 ## Using This In Home Assistant
 
